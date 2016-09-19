@@ -91,13 +91,13 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    //id,NULL,NULL,willTopic,willQos,willRetain,willMessage
-    if (client.connect("ESP8266Client", NULL, NULL, NULL, 0, 0, NULL)) {
+    //id,NULL,NULL,willTopic,willQos,willRetain,willMessage, cleanSession
+    if (client.connect("ESP8266Client", NULL, NULL, NULL, 0, 0, NULL, false)) {
       Serial.println("connected");
       // Once connected, publish an announcement...
       client.publish("outTopic", "hello from ESP");
       // ... and resubscribe
-      client.subscribe("inTopic", 1);
+      client.subscribe("inTopic", 1);//qos = 1
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
