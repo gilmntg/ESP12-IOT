@@ -29,9 +29,9 @@
 #include <WiFiUdp.h>
 #include <FS.h>
 #include <ArduinoOTA.h>
+#include "Timer.h"
 
 #define HOSTNAME "ESP8266-1-OTA-" ///< Hostename. The setup function adds the Chip ID at the end.
-
 
 // Update these with values suitable for your network.
 
@@ -44,6 +44,58 @@ PubSubClient client(espClient);
 long lastMsg = 0;
 char msg[50];
 int value = 0;
+
+
+//GPIO#                            0     1     2     3     4     5     6      7     8       9    10     11    12     13    14    15   16
+int ESP12E_gpio_exist_list[] = { true, false, true, false, true, true, false, false, false, true, true, false, true, true, true, true, true };
+char* ESP12E_gpio_num_list[] = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" ,"A", "B", "C", "D", "E", "F", "G" };
+
+char* gpio_leading_topic = "/esp/gpio/pin";
+char* gpio_mode_topic = "/mode";
+char* gpio_val_topic = "/val";
+
+enum topic_tail_desc { MODE_TOPIC, VAL_TOPIC };
+
+void build_topic(int pin, topic_tail_desc tail_desc, char* out_topic, unsigned int length) {
+  if (strlen(gpio_leading_topic) + strlen(ESP12E_gpio_num_list[pin]) + (tail_desc == MODE_TOPIC) ? strlen(gpio_mode_topic) : strlen(gpio_val_topic) <= length - 1) {
+    memset(out_topic, '\0', length);
+    strcat(out_topic, gpio_leading_topic);
+    strcat(out_topic, ESP12E_gpio_num_list[pin]);
+    if (tail_desc == MODE_TOPIC) {
+      strcat(out_topic, gpio_mode_topic);
+    } else {
+      strcat(out_topic, gpio_val_topic);
+    }
+  } else {
+    Serial.print("out_topic length too short");
+  }
+}
+void pin_mode_callback(char* topic, byte* payload, unsigned int length) {
+  //extract the pin number from the topic:
+  //first verify that the topic is of type "mode" (otherwise bail out): 
+  if (!strcmp(&topic[length-5], "mode")) {
+    Serial.print("topic=");
+    Serial.println(topic);
+    for (int i=0; i<length; i++) {
+      Serial.print((char)payload[i]);
+    }
+  }
+}
+
+#define TOPIC_LENGTH 30
+  char topic[TOPIC_LENGTH];
+
+void subscribe_all_gpios_mode() {
+  //client.setCallback(pin_mode_callback);
+  int num_gpios = sizeof(ESP12E_gpio_exist_list)/sizeof(int);
+  for (int i = 0; i < num_gpios ; i++ ) {
+    if (ESP12E_gpio_exist_list[i]) {
+      build_topic(i, MODE_TOPIC, topic, TOPIC_LENGTH);
+      client.subscribe(topic, 1);//qos = 1
+    }
+  }
+}
+
 
 void setup_wifi() {
 
@@ -98,6 +150,7 @@ void reconnect() {
       client.publish("outTopic", "hello from ESP");
       // ... and resubscribe
       client.subscribe("inTopic", 1);//qos = 1
+      subscribe_all_gpios_mode();
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -157,8 +210,10 @@ void loop() {
     client.publish("outTopic", msg);
   }
 
-   // Handle OTA server.
+  // Handle OTA server.
   ArduinoOTA.handle();
   yield();
 
 }
+
+
