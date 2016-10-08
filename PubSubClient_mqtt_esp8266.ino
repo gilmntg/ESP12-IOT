@@ -31,13 +31,13 @@
 #include <ArduinoOTA.h>
 #include "Timer.h"
 
-#define HOSTNAME "ESP8266-1-OTA-" ///< Hostename. The setup function adds the Chip ID at the end.
-
+#define HOSTNAME "ESP8266-" ///< Hostename. The setup function adds the Chip ID at the end
 // Update these with values suitable for your network.
 
 const char* ssid = "gmontag-room";
 const char* password = "gm3351324";
 const char* mqtt_server = "raspberrypi-desktop";
+
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -47,55 +47,33 @@ int value = 0;
 
 
 //GPIO#                            0     1     2     3     4     5     6      7     8       9    10     11    12     13    14    15   16
-int ESP12E_gpio_exist_list[] = { true, false, true, false, true, true, false, false, false, true, true, false, true, true, true, true, true };
-char* ESP12E_gpio_num_list[] = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" ,"A", "B", "C", "D", "E", "F", "G" };
+bool ESP12E_gpio_exist_list[] = { true, false, true, false, true, true, false, false, false, true, true, false, true, true, true, true, true };
+                                        
+String outtopic("");
 
-char* gpio_leading_topic = "/esp/gpio/pin";
-char* gpio_mode_topic = "/mode";
-char* gpio_val_topic = "/val";
-
-enum topic_tail_desc { MODE_TOPIC, VAL_TOPIC };
-
-void build_topic(int pin, topic_tail_desc tail_desc, char* out_topic, unsigned int length) {
-  if (strlen(gpio_leading_topic) + strlen(ESP12E_gpio_num_list[pin]) + (tail_desc == MODE_TOPIC) ? strlen(gpio_mode_topic) : strlen(gpio_val_topic) <= length - 1) {
-    memset(out_topic, '\0', length);
-    strcat(out_topic, gpio_leading_topic);
-    strcat(out_topic, ESP12E_gpio_num_list[pin]);
-    if (tail_desc == MODE_TOPIC) {
-      strcat(out_topic, gpio_mode_topic);
-    } else {
-      strcat(out_topic, gpio_val_topic);
-    }
-  } else {
-    Serial.print("out_topic length too short");
-  }
-}
-void pin_mode_callback(char* topic, byte* payload, unsigned int length) {
-  //extract the pin number from the topic:
-  //first verify that the topic is of type "mode" (otherwise bail out): 
-  if (!strcmp(&topic[length-5], "mode")) {
-    Serial.print("topic=");
-    Serial.println(topic);
-    for (int i=0; i<length; i++) {
-      Serial.print((char)payload[i]);
-    }
-  }
+String get_full_hostname() {
+  String my_hostname(HOSTNAME);
+  my_hostname += String(ESP.getChipId(), HEX);
+  return my_hostname;
 }
 
-#define TOPIC_LENGTH 30
-  char topic[TOPIC_LENGTH];
+String topic_gpio() {
+  return get_full_hostname() + String("/gpio");
+}
+String topic_my_gpio_list() {
+  return get_full_hostname() + String("/my_gpio_list");
+}
 
-void subscribe_all_gpios_mode() {
-  //client.setCallback(pin_mode_callback);
-  int num_gpios = sizeof(ESP12E_gpio_exist_list)/sizeof(int);
-  for (int i = 0; i < num_gpios ; i++ ) {
+String gpio_list_payload() {
+    String tmp("");
+  for (int i=0; i<sizeof(ESP12E_gpio_exist_list)/sizeof(bool); i++) {
     if (ESP12E_gpio_exist_list[i]) {
-      build_topic(i, MODE_TOPIC, topic, TOPIC_LENGTH);
-      client.subscribe(topic, 1);//qos = 1
+      tmp += String(i, HEX);
+      tmp += String(",");
     }
   }
+  return tmp;
 }
-
 
 void setup_wifi() {
 
@@ -118,6 +96,14 @@ void setup_wifi() {
   Serial.println(WiFi.localIP());
 }
 
+String build_payload_string(byte* payload, unsigned int length) {
+  String ret("");
+  for (int i=0; i<length; i++) {
+    ret += String((char)payload[i]);
+  }
+  return ret;
+}
+
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -126,6 +112,46 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.print((char)payload[i]);
   }
   Serial.println();
+
+  if (String(topic) == topic_gpio()) {
+    Serial.println("DEBUG: topic OK");
+    //parse the GPIO payload
+    //payload can be either:
+    // direction <<gpio#>> output OR direction <<gpio#>> input <<poll_period>>
+    String payload_string = build_payload_string(payload, length);
+    int offset = 0;
+    if (payload_string.substring(offset, offset + strlen("out-topic")) == String("out-topic")) {
+      offset += strlen("out-topic") + 1;
+      Serial.print("Received  command to set out-topic to: ");
+      outtopic = payload_string.substring(offset);
+      Serial.println(outtopic);
+    } else if (payload_string.substring(offset, offset + strlen("write")) == String("write")) {
+      offset += strlen("write") + 1;
+      int gpio_num = payload_string.substring(offset, offset+2).toInt();
+      offset += 3;
+      Serial.print("Received  command to write GPIO# ");
+      Serial.print(gpio_num);
+      int value = payload_string.substring(offset).toInt();
+      Serial.print(" To value: ");
+      Serial.println(value);
+    } else if (payload_string.substring(offset, offset + strlen("read")) == String("read")) {
+      offset += strlen("read") + 1;
+      int gpio_num = payload_string.substring(offset, offset+2).toInt();
+      offset += 3;
+      Serial.print("Received  command to read from GPIO# ");
+      Serial.println(gpio_num);
+      if (outtopic != "") {
+        client.publish((get_full_hostname() + String("/") + outtopic).c_str(), "1");//TODO
+      }
+    } else if (payload_string.substring(offset, offset + strlen("list")) == String("list")) {
+        Serial.println("Received command to list all GPIOs");
+        if (outtopic != "") {
+          client.publish((get_full_hostname() + String("/") + outtopic).c_str(), gpio_list_payload().c_str());
+        }
+    } else {
+      Serial.println("unknown command:" + payload_string.substring(offset));
+    }
+  }
 
   // Switch on the LED if an 1 was received as first character
   if ((char)payload[0] == '1') {
@@ -138,19 +164,31 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 }
 
+
 void reconnect() {
+ 
   // Loop until we're reconnected
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    //id,NULL,NULL,willTopic,willQos,willRetain,willMessage, cleanSession
-    if (client.connect("ESP8266Client", NULL, NULL, NULL, 0, 0, NULL, false)) {
+    //                 id,               NULL, NULL, willTopic,willQos,willRetain,willMessage, cleanSession
+    if (client.connect(get_full_hostname().c_str(), NULL, NULL, NULL,     0,      0,         NULL,        false)) {
       Serial.println("connected");
       // Once connected, publish an announcement...
       client.publish("outTopic", "hello from ESP");
+      //Publish to "iot-devices" topic, our device hostname - used by other clients subscribed to iot-devices to register our device into their Database
+      client.publish("iot-devices", get_full_hostname().c_str());
       // ... and resubscribe
       client.subscribe("inTopic", 1);//qos = 1
-      subscribe_all_gpios_mode();
+      //other client: publish to topic: "FULL-HOSTNAME/gpio", payload: "out-topic <<topic>>" - will set the 
+      //out-topic for all input related commands
+      //Other client: publish to topic: "FULL-HOSTNAME/gpio" payload: "write <<gpio#>> <<val>>" - will configure GPIO# as output 
+      //and write the value
+      //other client: publish to topic: "FULL-HOSTNAME/gpio" payload: "read <<gpio#>>" will configure GPIO# to direction=INPUT
+      //, read this gpio and publish to topic: "FULL-HOSTNAME/<<out_topic>>" with the payload: <<value>>
+      //other client: publish to topic: "FULL-HOSTNAME/gpio" payload: "list" - will cause this device to publish the gpio list 
+      //into topic: FULL-HOSTNAME/<<out_topic>> the payload: (e.g.) "0,1,2,4,5" as the existing GPIOs in this device
+      client.subscribe(topic_gpio().c_str(), 1);//qos = 1
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
