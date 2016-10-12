@@ -117,54 +117,62 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.println("DEBUG: topic OK");
     //parse the  payload
     //payload can be either:
-    // direction <<gpio#>> output OR direction <<gpio#>> input <<poll_period>>
-    String payload_string = build_payload_string(payload, length);
-    int offset = 0;
-    if (payload_string.substring(offset, offset + strlen("out-topic")) == String("out-topic")) {
-      offset += strlen("out-topic") + 1;
-      Serial.print("Received  command to set out-topic to: ");
-      outtopic = payload_string.substring(offset);
-      Serial.println(outtopic);
-    } else if (payload_string.substring(offset, offset + strlen("write")) == String("write")) {
-      offset += strlen("write") + 1;
-      int gpio_num = payload_string.substring(offset, offset+2).toInt();
-      offset += 3;
-      Serial.print("Received  command to write GPIO# ");
-      Serial.print(gpio_num);
-      int value = payload_string.substring(offset).toInt();
-      Serial.print(" To value: ");
-      Serial.println(value);
-      pinMode(gpio_num, OUTPUT); 
-      digitalWrite(gpio_num, value & 0x01);
-    } else if (payload_string.substring(offset, offset + strlen("read")) == String("read")) {
-      offset += strlen("read") + 1;
-      int gpio_num = payload_string.substring(offset, offset+2).toInt();
-      offset += 3;
-      Serial.print("Received  command to read from GPIO# ");
-      Serial.println(gpio_num);
-      pinMode(gpio_num, INPUT); 
-      if (outtopic != "") {
-        client.publish((get_full_hostname() + String("/") + outtopic).c_str(), String(digitalRead(gpio_num)&0x01, HEX).c_str());//TODO
+    // "write <<gpio#>> <value>>" OR "read <<gpio#>>" OR "list" OR "out-topic <<some string>>"
+    
+    char* token = strtok((char*)payload, " \0\n");
+    if (String(token) == "out-topic") {
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        outtopic = String(token);
+        Serial.print("Received command to set out-topic to: ");
+        Serial.println(outtopic);
+      } else {
+        Serial.println("Invalid out-topic payload");
       }
-    } else if (payload_string.substring(offset, offset + strlen("list")) == String("list")) {
-        Serial.println("Received command to list all GPIOs");
+    } else if (String(token) == "write") {
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        int gpio_num = String(token).toInt();
+        token = strtok(NULL, " \n");
+        if (token != NULL) {
+          int gpio_val = String(token).toInt() & 0x01;
+          Serial.print("Received command to write to GPIO# ");
+          Serial.print(gpio_num);
+          Serial.print(" The value: ");
+          Serial.println(gpio_val);
+          pinMode(gpio_num, OUTPUT); 
+          digitalWrite(gpio_num, gpio_val & 0x01);
+        } else {
+          Serial.println("Invalid gpio_val argument to \"write\" topic");
+        }
+      } else {
+        Serial.println("Invalid gpio_num argument to \"write\" topic");
+      }
+    } else if (String(token) == "read") {
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        Serial.print("token = ");
+        Serial.println(token);
+        int gpio_num = String(token).toInt();
+          Serial.print("Received command to read from GPIO# ");
+          Serial.println(gpio_num);
+          pinMode(gpio_num, INPUT); 
+          if (outtopic != "") {
+            client.publish((get_full_hostname() + String("/") + outtopic).c_str(), String(digitalRead(gpio_num)&0x01, HEX).c_str());//TODO
+          }
+      } else {
+        Serial.println("Invalid gpio_num argument to \"read\" topic");
+      }
+    } else if (String(token) == "list") {
+        Serial.println("Received command to list all existing GPIOs");
         if (outtopic != "") {
           client.publish((get_full_hostname() + String("/") + outtopic).c_str(), gpio_list_payload().c_str());
         }
-    } else {
-      Serial.println("unknown command:" + payload_string.substring(offset));
+    } else  {
+        Serial.print("unknown command: ");
+        Serial.println((char*)payload);
     }
   }
-
-  // Switch on the LED if an 1 was received as first character
-  if ((char)payload[0] == '1') {
-    digitalWrite(2, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is acive low on the ESP-01)
-  } else {
-    digitalWrite(2, HIGH);  // Turn the LED off by making the voltage HIGH
-  }
-
 }
 
 
