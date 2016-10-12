@@ -1,3 +1,6 @@
+
+
+
 /*
  Basic ESP8266 MQTT example
 
@@ -31,7 +34,7 @@
 #include <ArduinoOTA.h>
 #include "Timer.h"
 
-#define HOSTNAME "ESP8266-" ///< Hostename. The setup function adds the Chip ID at the end
+#define HOSTNAME "ESP12E-" ///< Hostename. The setup function adds the Chip ID at the end
 // Update these with values suitable for your network.
 
 const char* ssid = "gmontag-room";
@@ -57,11 +60,8 @@ String get_full_hostname() {
   return my_hostname;
 }
 
-String topic_gpio() {
-  return get_full_hostname() + String("/gpio");
-}
-String topic_my_gpio_list() {
-  return get_full_hostname() + String("/my_gpio_list");
+String topic_cmd() {
+  return get_full_hostname() + String("/cmd");
 }
 
 String gpio_list_payload() {
@@ -113,9 +113,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
   Serial.println();
 
-  if (String(topic) == topic_gpio()) {
+  if (String(topic) == topic_cmd()) {
     Serial.println("DEBUG: topic OK");
-    //parse the GPIO payload
+    //parse the  payload
     //payload can be either:
     // direction <<gpio#>> output OR direction <<gpio#>> input <<poll_period>>
     String payload_string = build_payload_string(payload, length);
@@ -134,14 +134,17 @@ void callback(char* topic, byte* payload, unsigned int length) {
       int value = payload_string.substring(offset).toInt();
       Serial.print(" To value: ");
       Serial.println(value);
+      pinMode(gpio_num, OUTPUT); 
+      digitalWrite(gpio_num, value & 0x01);
     } else if (payload_string.substring(offset, offset + strlen("read")) == String("read")) {
       offset += strlen("read") + 1;
       int gpio_num = payload_string.substring(offset, offset+2).toInt();
       offset += 3;
       Serial.print("Received  command to read from GPIO# ");
       Serial.println(gpio_num);
+      pinMode(gpio_num, INPUT); 
       if (outtopic != "") {
-        client.publish((get_full_hostname() + String("/") + outtopic).c_str(), "1");//TODO
+        client.publish((get_full_hostname() + String("/") + outtopic).c_str(), String(digitalRead(gpio_num)&0x01, HEX).c_str());//TODO
       }
     } else if (payload_string.substring(offset, offset + strlen("list")) == String("list")) {
         Serial.println("Received command to list all GPIOs");
@@ -180,15 +183,15 @@ void reconnect() {
       client.publish("iot-devices", get_full_hostname().c_str());
       // ... and resubscribe
       client.subscribe("inTopic", 1);//qos = 1
-      //other client: publish to topic: "FULL-HOSTNAME/gpio", payload: "out-topic <<topic>>" - will set the 
+      //other client: publish to topic: "FULL-HOSTNAME/cmd", payload: "out-topic <<topic>>" - will set the 
       //out-topic for all input related commands
-      //Other client: publish to topic: "FULL-HOSTNAME/gpio" payload: "write <<gpio#>> <<val>>" - will configure GPIO# as output 
+      //Other client: publish to topic: "FULL-HOSTNAME/cmd" payload: "write <<gpio#>> <<val>>" - will configure GPIO# as output 
       //and write the value
-      //other client: publish to topic: "FULL-HOSTNAME/gpio" payload: "read <<gpio#>>" will configure GPIO# to direction=INPUT
+      //other client: publish to topic: "FULL-HOSTNAME/cmd" payload: "read <<gpio#>>" will configure GPIO# to direction=INPUT
       //, read this gpio and publish to topic: "FULL-HOSTNAME/<<out_topic>>" with the payload: <<value>>
-      //other client: publish to topic: "FULL-HOSTNAME/gpio" payload: "list" - will cause this device to publish the gpio list 
+      //other client: publish to topic: "FULL-HOSTNAME/cmd" payload: "list" - will cause this device to publish the gpio list 
       //into topic: FULL-HOSTNAME/<<out_topic>> the payload: (e.g.) "0,1,2,4,5" as the existing GPIOs in this device
-      client.subscribe(topic_gpio().c_str(), 1);//qos = 1
+      client.subscribe(topic_cmd().c_str(), 1);//qos = 1
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -209,25 +212,23 @@ void setup() {
   String hostname(HOSTNAME);
   hostname += String(ESP.getChipId(), HEX);
   WiFi.hostname(hostname);
-
+  
   // Print hostname.
   Serial.println("Hostname: " + hostname);
   //Serial.println(WiFi.hostname());
 
   // Start OTA server.
-  ArduinoOTA.setHostname((const char *)hostname.c_str());
-  ArduinoOTA.begin();
-
-
-  pinMode(2, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
-  Serial.begin(115200);
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
-
     // Start OTA server.
   ArduinoOTA.setHostname((const char *)hostname.c_str());
   ArduinoOTA.begin();
+
+  pinMode(2, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
+  Serial.begin(115200);
+
+  client.setCallback(callback);
+  client.setServer(mqtt_server, 1883);
+
+  setup_wifi();
 
 }
 
@@ -237,7 +238,7 @@ void loop() {
     reconnect();
   }
   client.loop();
-
+#if 0
   long now = millis();
   if (now - lastMsg > 2000) {
     lastMsg = now;
@@ -247,7 +248,7 @@ void loop() {
     Serial.println(msg);
     client.publish("outTopic", msg);
   }
-
+#endif
   // Handle OTA server.
   ArduinoOTA.handle();
   yield();
