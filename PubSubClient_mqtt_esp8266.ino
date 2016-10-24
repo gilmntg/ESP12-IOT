@@ -274,37 +274,37 @@ IRsend irsend(5); //using GPIO5 for IR
 
 void ir_send_prot(int prot, unsigned int command, int nbits) {
   switch (prot) {
-    case RC5:
+    case PROT_RC5:
       irsend.sendRC5(command, nbits);
     break;
-    case RC6:
+    case PROT_RC6:
       irsend.sendRC6(command, nbits);
     break;
-    case NEC:
+    case PROT_NEC:
       irsend.sendNEC(command, nbits);
     break;
-    case SONY:
+    case PROT_SONY:
       irsend.sendSony(command, nbits);
     break;
-    case PANASONIC:
+    case PROT_PANASONIC:
       irsend.sendPanasonic(command, nbits);
     break;
-    case JVC:
+    case PROT_JVC:
       irsend.sendJVC(command, nbits, 0);//repeat = 0
     break;
-    case SAMSUNG:
+    case PROT_SAMSUNG:
       irsend.sendSAMSUNG(command, nbits);
     break;
-    case WHYNTER:
+    case PROT_WHYNTER:
       irsend.sendWhynter(command, nbits);
     break;
-    case DISH:
+    case PROT_DISH:
       irsend.sendDISH(command, nbits);
     break;
-    case SHARP:
+    case PROT_SHARP:
       irsend.sendSharp(command, nbits);
     break;
-    case COOLIX:
+    case PROT_COOLIX:
       irsend.sendCOOLIX(command, nbits);
     break;
     default:
