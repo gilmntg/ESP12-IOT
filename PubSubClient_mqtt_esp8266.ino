@@ -38,6 +38,9 @@ extern "C" {
 #include "user_interface.h"
 }
 
+#include <IRremoteESP8266.h>
+
+
 
 #define HOSTNAME "ESP12E-" ///< Hostename. The setup function adds the Chip ID at the end
 // Update these with values suitable for your network.
@@ -54,13 +57,64 @@ char msg[50];
 int value = 0;
 
 
-//GPIO#                            0     1     2     3     4     5     6      7     8       9    10     11    12     13    14    15   16
-bool ESP12E_gpio_exist_list[] = { true, false, true, false, true, true, false, false, false, true, true, false, true, true, true, true, true };
+//GPIO#                            0     1     2      3      4     5      6      7      8      9     10    11     12     13     14    15    16
+bool ESP12E_gpio_exist_list[] = { true, false, false, false, true, false, false, false, false, true, true, false, false, false, true, true, true };
 
 String outtopic("");
 
-//SimpleTimer timer;
+/*
+class CircBuff {
+  private:
+    int m_write_pointer;
+    int m_read_pointer;
+    static const int MAX_ITEMS = 150;
+    byte m_items[MAX_ITEMS];
+    int m_size;
+  public:
+  CircBuff() {
+    m_write_pointer = 0;
+    m_read_pointer = 0;
+    memset(m_items, 0, sizeof(m_items));
+  }
+  ~CircBuff() {};
+  bool Write(byte data) {
+    m_items[m_write_pointer] = data;
+    m_write_pointer = (m_write_pointer + 1) % MAX_ITEMS;
+    return true;
+  }
+  bool Read(byte *data) {
+    *data = m_items[m_read_pointer];
+    m_read_pointer = (m_read_pointer + 1) % MAX_ITEMS;
+    return true;
+  }
+};
 
+class A2DSampler {
+  private:
+    static CircBuff& m_buff;
+    os_timer_t m_timer;
+  public:
+    A2DSampler(int samp_rate) {
+      os_timer_disarm(&m_timer);
+      os_timer_setfn(&m_timer, (os_timer_func_t *)SampleCB, NULL); //pArg = NULL for now
+      os_timer_arm(&m_timer, samp_rate,  1); //repetitive
+    }
+    ~A2DSampler() {
+      os_timer_disarm(&m_timer);
+    };
+    static void SampleCB(void *pArg) {
+      m_buff.Write(analogRead(0));
+    }
+    void ReadNSamples(int num, byte* buff) {
+      for (int i=0; i< num; i++) {
+        m_buff.Read((byte*)(buff+i));
+      }
+    }
+};
+
+CircBuff samples_buff;
+CircBuff& A2DSampler::m_buff = samples_buff; 
+*/
 class Blinker {
 
   public:
@@ -180,6 +234,86 @@ String build_payload_string(byte* payload, unsigned int length) {
   return ret;
 }
 
+enum protocol {
+  PROT_UNDEFINED = -1,
+  PROT_RC5,
+  PROT_RC6,
+  PROT_NEC,
+  PROT_SONY,
+  PROT_PANASONIC,
+  PROT_JVC,
+  PROT_SAMSUNG,
+  PROT_WHYNTER,
+  PROT_DISH,
+  PROT_SHARP,
+  PROT_COOLIX
+};
+String protocol_names_lut[] = {
+  "RC5",
+  "RC6",
+  "NEC",
+  "SONY",
+  "PANASONIC",
+  "JVC",
+  "SAMSUNG",
+  "WHYNTER",
+  "DISH",
+  "SHARP",
+  "COOLIX"
+};
+
+int get_protocol_from_name(String& name) {
+  for (int i=0; i<sizeof(protocol_names_lut)/sizeof(protocol_names_lut[0]); i++) {
+    if (name == protocol_names_lut[i]) {
+      return i;
+    }
+  }
+  return PROT_UNDEFINED;
+}
+IRsend irsend(5); //using GPIO5 for IR
+
+void ir_send_prot(int prot, unsigned int command, int nbits) {
+  switch (prot) {
+    case RC5:
+      irsend.sendRC5(command, nbits);
+    break;
+    case RC6:
+      irsend.sendRC6(command, nbits);
+    break;
+    case NEC:
+      irsend.sendNEC(command, nbits);
+    break;
+    case SONY:
+      irsend.sendSony(command, nbits);
+    break;
+    case PANASONIC:
+      irsend.sendPanasonic(command, nbits);
+    break;
+    case JVC:
+      irsend.sendJVC(command, nbits, 0);//repeat = 0
+    break;
+    case SAMSUNG:
+      irsend.sendSAMSUNG(command, nbits);
+    break;
+    case WHYNTER:
+      irsend.sendWhynter(command, nbits);
+    break;
+    case DISH:
+      irsend.sendDISH(command, nbits);
+    break;
+    case SHARP:
+      irsend.sendSharp(command, nbits);
+    break;
+    case COOLIX:
+      irsend.sendCOOLIX(command, nbits);
+    break;
+    default:
+    break;
+  }//switch
+}
+
+unsigned int irSignalBuf[100]; //raw buffer for IR irsend.sendRaw()
+
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -239,18 +373,102 @@ void callback(char* topic, byte* payload, unsigned int length) {
       } else {
         Serial.println("Invalid gpio_num argument to \"read\" topic");
       }
-    } else if (String(token) == "list") {
+    } /*else if (String(token) == "aread") { //A/D read
+        token = strtok(NULL, " \0\n");
+        if (token != NULL) {
+          Serial.print("token = ");
+          Serial.println(token);
+          int num = String(token).toInt();
+          Serial.print("Received command to read from A/D#0, num samples = ");
+          Serial.println(num);
+          if (outtopic != "") {
+            //client.publish((get_full_hostname() + String("/") + outtopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
+            //dump last N samples from A/D circular buffer
+          }
+        } else {
+          Serial.println("Invalid gpio_num argument to \"read\" topic");
+        }
+    } */else if (String(token) == "list") {
       Serial.println("Received command to list all existing GPIOs");
       if (outtopic != "") {
         client.publish((get_full_hostname() + String("/") + outtopic).c_str(), gpio_list_payload().c_str());
       }
+    } else if (String(token) == "irsendprot") {
+      enum protocol prot;
+      unsigned long command;
+      unsigned int nbits;
+      //parsing protocol
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        String protocol_name = String(token);
+        prot = (enum protocol)get_protocol_from_name(protocol_name);
+        if (prot == PROT_UNDEFINED) {
+          Serial.println("Undefined protocol");
+          return;
+        }
+      } else {
+        Serial.println("Expected a valid protocol name!");
+        return;
+      }
+      //parsing command
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        command = (unsigned long)strtoul(token, NULL, 16); //assuming hex number format 0xNNNNNNNN
+      } else {
+        Serial.println("Expected a valid command!");
+        return;
+      }
+      //parsing nbits
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        nbits = String(token).toInt();
+      } else {
+        Serial.println("Expected a valid nbits!");
+        return;
+      }
+      //sending the IR command
+      Serial.println("Sending IR command on protocol " + protocol_names_lut[prot] + ": 0x" + String(command, HEX));
+      ir_send_prot(prot, command, nbits);
+    } else if (String(token) == "irsendraw") {
+      unsigned int nbits;
+      unsigned int npairs;
+      unsigned int freq;
+      
+      memset(irSignalBuf, 0, sizeof(irSignalBuf));
+      //parsing npairs
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        npairs = String(token).toInt();
+        if ((npairs > 50) || (npairs < 0)) {
+          Serial.println("Invalid npairs value");
+          return;
+        }
+        for (int i=0; i<npairs; i++) {
+          token = strtok(NULL, " \0\n");
+          if (token != NULL) {
+            irSignalBuf[i] = String(token).toInt();
+          }
+        }
+      } else {
+        Serial.println("Expected a valid npairs parameter");
+        return;
+      }
+      //parsing freq Hz
+      token = strtok(NULL, " \0\n");
+      if (token != NULL) {
+        freq = String(token).toInt();
+      } else {
+        Serial.println("Expected a valid frequency parameter");
+        return;
+      }
+      //sending the IR command
+      irsend.sendRaw(irSignalBuf, npairs*2, freq);
     } else  {
       Serial.print("unknown command: ");
       Serial.println((char*)payload);
     }
   }
 }
-
 
 void reconnect() {
 
@@ -291,6 +509,8 @@ void reconnect() {
 
 void setup() {
 
+  irsend.begin();
+
   active_led.SetRate(Blinker::BLINK_RATE_OFF);
 
   Serial.println("\r\n");
@@ -320,6 +540,8 @@ void setup() {
   active_led.SetRate(Blinker::BLINK_RATE_SLOW);
   setup_wifi();
   active_led.SetRate(Blinker::BLINK_RATE_FAST);
+
+//  A2DSampler a2d_sampler(10);
 }
 
 void loop() {
