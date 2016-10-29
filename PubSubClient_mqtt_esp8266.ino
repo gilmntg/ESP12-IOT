@@ -431,19 +431,19 @@ void callback(char* topic, byte* payload, unsigned int length) {
       ir_send_prot(prot, command, nbits);
     } else if (String(token) == "irsendraw") {
       unsigned int nbits;
-      unsigned int npairs;
+      unsigned int nitems;
       unsigned int freq;
       
       memset(irSignalBuf, 0, sizeof(irSignalBuf));
-      //parsing npairs
+      //parsing nitems
       token = strtok(NULL, " \0\n");
       if (token != NULL) {
-        npairs = String(token).toInt();
-        if ((npairs > 50) || (npairs < 0)) {
+        nitems = String(token).toInt();
+        if ((nitems > 100) || (nitems < 0)) {
           Serial.println("Invalid npairs value");
           return;
         }
-        for (int i=0; i<npairs; i++) {
+        for (int i=0; i<nitems; i++) {
           token = strtok(NULL, " \0\n");
           if (token != NULL) {
             irSignalBuf[i] = String(token).toInt();
@@ -453,7 +453,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
         Serial.println("Expected a valid npairs parameter");
         return;
       }
-      //parsing freq Hz
+      //parsing freq kHz
       token = strtok(NULL, " \0\n");
       if (token != NULL) {
         freq = String(token).toInt();
@@ -462,7 +462,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
         return;
       }
       //sending the IR command
-      irsend.sendRaw(irSignalBuf, npairs*2, freq);
+      irsend.sendRaw(irSignalBuf, nitems, freq);
     } else  {
       Serial.print("unknown command: ");
       Serial.println((char*)payload);
