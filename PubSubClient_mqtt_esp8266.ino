@@ -60,7 +60,7 @@ int value = 0;
 //GPIO#                            0     1     2      3      4     5      6      7      8      9     10    11     12     13     14    15    16
 bool ESP12E_gpio_exist_list[] = { true, false, false, false, true, false, false, false, false, true, true, false, false, false, true, true, true };
 
-String outtopic("");
+String debugtopic("");
 
 /*
 class CircBuff {
@@ -314,67 +314,101 @@ void ir_send_prot(int prot, unsigned int command, int nbits) {
 
 unsigned int irSignalBuf[100]; //raw buffer for IR irsend.sendRaw()
 
+void mqtt_debug_print( const char *msg ) {
+    Serial.print(msg);
+    if (debugtopic != "") {
+      client.publish((get_full_hostname() + String("/") + debugtopic).c_str(), msg);
+    }
+}
+void mqtt_debug_println( const char *msg ) {
+    Serial.println(msg);
+    if (debugtopic != "") {
+      client.publish((get_full_hostname() + String("/") + debugtopic).c_str(), (msg + String("\n")).c_str());
+    }
+}
+
+#define MAX_PAYLOAD_LEN 100
+char strtok_payload[MAX_PAYLOAD_LEN];
+#define TOKEN_DELIM " \0\n"
+
 void callback(char* topic, byte* payload, unsigned int length) {
+  if (length > MAX_PAYLOAD_LEN) {
+    Serial.println("Too long payload in MQTT message");
+    return;
+  }
+  memset(strtok_payload, 0, sizeof(strtok_payload));//strtok requires a buffer with NULL chars at it's end to work on
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
   for (int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
+    strtok_payload[i] = payload[i];
   }
   Serial.println();
 
   if (String(topic) == topic_cmd()) {
-    Serial.println("DEBUG: topic OK");
+    mqtt_debug_println("topic OK");
     //parse the  payload
     //payload can be either:
     // "write <<gpio#>> <value>>" OR "read <<gpio#>>" OR "list" OR "out-topic <<some string>>"
 
-    char* token = strtok((char*)payload, " \0\n");
-    if (String(token) == "out-topic") {
-      token = strtok(NULL, " \0\n");
+    char* token = strtok(strtok_payload, TOKEN_DELIM);
+    Serial.println(String("first token (from payload) = ") + String(token));
+    if (String(token) == "debug-topic") {
+      token = strtok(NULL, TOKEN_DELIM);
+      Serial.println("token = " + String(token));
       if (token != NULL) {
-        outtopic = String(token);
-        Serial.print("Received command to set out-topic to: ");
-        Serial.println(outtopic);
+        debugtopic = String(token);
+        Serial.print("Received command to set debug-topic to: ");
+        Serial.println(debugtopic);
       } else {
-        Serial.println("Invalid out-topic payload");
+        Serial.println("Invalid debug-topic payload");
       }
     } else if (String(token) == "write") {
-      token = strtok(NULL, " \0\n");
+      token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
         int gpio_num = String(token).toInt();
-        token = strtok(NULL, " \n");
+        token = strtok(NULL, TOKEN_DELIM);
         if (token != NULL) {
           int gpio_val = String(token).toInt() & 0x01;
-          Serial.print("Received command to write to GPIO# ");
-          Serial.print(gpio_num);
-          Serial.print(" The value: ");
-          Serial.println(gpio_val);
+          mqtt_debug_print("Received command to write to GPIO# ");
+          mqtt_debug_print(String(gpio_num, DEC).c_str());
+          mqtt_debug_print(" The value: ");
+          mqtt_debug_println(token);
           pinMode(gpio_num, OUTPUT);
           digitalWrite(gpio_num, gpio_val & 0x01);
         } else {
-          Serial.println("Invalid gpio_val argument to \"write\" topic");
+          mqtt_debug_println("Invalid gpio_val argument to \"write\" topic");
         }
       } else {
-        Serial.println("Invalid gpio_num argument to \"write\" topic");
+        mqtt_debug_println("Invalid gpio_num argument to \"write\" topic");
       }
     } else if (String(token) == "read") {
-      token = strtok(NULL, " \0\n");
+      token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
-        Serial.print("token = ");
-        Serial.println(token);
+        mqtt_debug_print("token = ");
+        mqtt_debug_println(token);
         int gpio_num = String(token).toInt();
-        Serial.print("Received command to read from GPIO# ");
-        Serial.println(gpio_num);
-        pinMode(gpio_num, INPUT);
-        if (outtopic != "") {
-          client.publish((get_full_hostname() + String("/") + outtopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
+        //get result topic
+        token = strtok(NULL, TOKEN_DELIM);
+        if (token != NULL) {
+          String restopic = String(token);
+          mqtt_debug_print("Received command to read from GPIO# ");
+          mqtt_debug_println(String(gpio_num, DEC).c_str());
+          pinMode(gpio_num, INPUT);
+          if (restopic != "") {
+            client.publish((get_full_hostname() + String("/") + restopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
+          }
+        } else {
+          mqtt_debug_println("Invalid result_topic argument to \"read\" topic");
         }
       } else {
-        Serial.println("Invalid gpio_num argument to \"read\" topic");
+        mqtt_debug_println("Invalid gpio_num argument to \"read\" topic");
       }
-    } /*else if (String(token) == "aread") { //A/D read
-        token = strtok(NULL, " \0\n");
+    } 
+#if 0    
+    else if (String(token) == "aread") { //A/D read
+        token = strtok(NULL, TOKEN_DELIM);
         if (token != NULL) {
           Serial.print("token = ");
           Serial.println(token);
@@ -388,46 +422,55 @@ void callback(char* topic, byte* payload, unsigned int length) {
         } else {
           Serial.println("Invalid gpio_num argument to \"read\" topic");
         }
-    } */else if (String(token) == "list") {
-      Serial.println("Received command to list all existing GPIOs");
-      if (outtopic != "") {
-        client.publish((get_full_hostname() + String("/") + outtopic).c_str(), gpio_list_payload().c_str());
+        
+    } 
+#endif    
+    else if (String(token) == "list") {
+       //get result topic
+      token = strtok(NULL, TOKEN_DELIM);
+      if (token != NULL) {
+        String restopic = String(topic);
+        mqtt_debug_println("Received command to list all existing GPIOs");
+        client.publish((get_full_hostname() + String("/") + restopic).c_str(), gpio_list_payload().c_str());
+      } else {
+        mqtt_debug_println("Invalid result_topic to list all existing GPIOs command");
       }
     } else if (String(token) == "irsendprot") {
       enum protocol prot;
       unsigned long command;
       unsigned int nbits;
       //parsing protocol
-      token = strtok(NULL, " \0\n");
+      token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
         String protocol_name = String(token);
         prot = (enum protocol)get_protocol_from_name(protocol_name);
         if (prot == PROT_UNDEFINED) {
-          Serial.println("Undefined protocol");
+          mqtt_debug_println("Undefined protocol");
           return;
         }
       } else {
-        Serial.println("Expected a valid protocol name!");
+        mqtt_debug_println("Expected a valid protocol name!");
         return;
       }
       //parsing command
-      token = strtok(NULL, " \0\n");
+      token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
         command = (unsigned long)strtoul(token, NULL, 16); //assuming hex number format 0xNNNNNNNN
       } else {
-        Serial.println("Expected a valid command!");
+        mqtt_debug_println("Expected a valid command!");
         return;
       }
       //parsing nbits
-      token = strtok(NULL, " \0\n");
+      token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
         nbits = String(token).toInt();
       } else {
-        Serial.println("Expected a valid nbits!");
+        mqtt_debug_println("Expected a valid nbits!");
         return;
       }
       //sending the IR command
-      Serial.println("Sending IR command on protocol " + protocol_names_lut[prot] + ": 0x" + String(command, HEX));
+      String debug_str = String("Sending IR command on protocol ") + protocol_names_lut[prot] + String(": 0x") + String(command, HEX);
+      mqtt_debug_println(debug_str.c_str());
       ir_send_prot(prot, command, nbits);
     } else if (String(token) == "irsendraw") {
       unsigned int nbits;
@@ -436,36 +479,36 @@ void callback(char* topic, byte* payload, unsigned int length) {
       
       memset(irSignalBuf, 0, sizeof(irSignalBuf));
       //parsing nitems
-      token = strtok(NULL, " \0\n");
+      token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
         nitems = String(token).toInt();
         if ((nitems > 100) || (nitems < 0)) {
-          Serial.println("Invalid npairs value");
+          mqtt_debug_println("Invalid nutems value");
           return;
         }
         for (int i=0; i<nitems; i++) {
-          token = strtok(NULL, " \0\n");
+          token = strtok(NULL, TOKEN_DELIM);
           if (token != NULL) {
             irSignalBuf[i] = String(token).toInt();
           }
         }
       } else {
-        Serial.println("Expected a valid npairs parameter");
+        mqtt_debug_println("Expected a valid npairs parameter");
         return;
       }
       //parsing freq kHz
-      token = strtok(NULL, " \0\n");
+      token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
         freq = String(token).toInt();
       } else {
-        Serial.println("Expected a valid frequency parameter");
+        mqtt_debug_println("Expected a valid frequency parameter");
         return;
       }
       //sending the IR command
       irsend.sendRaw(irSignalBuf, nitems, freq);
     } else  {
-      Serial.print("unknown command: ");
-      Serial.println((char*)payload);
+      String debug_str = String("unknown command: ") + String((char*)payload);
+      mqtt_debug_println(debug_str.c_str());
     }
   }
 }
