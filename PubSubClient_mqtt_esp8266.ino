@@ -62,59 +62,59 @@ bool ESP12E_gpio_exist_list[] = { true, false, false, false, true, false, false,
 
 String debugtopic("");
 
-/*
-class CircBuff {
+class ADCSampler {
   private:
-    int m_write_pointer;
-    int m_read_pointer;
-    static const int MAX_ITEMS = 150;
-    byte m_items[MAX_ITEMS];
-    int m_size;
+#define MAX_SAMPLES 1000
+    static byte m_buff[MAX_SAMPLES]; //up to 1000 samples
+    static os_timer_t m_timer;
+    static int m_current_samples;
+    static int m_samples_to_get;
+    int m_samp_rate_ms;
   public:
-  CircBuff() {
-    m_write_pointer = 0;
-    m_read_pointer = 0;
-    memset(m_items, 0, sizeof(m_items));
-  }
-  ~CircBuff() {};
-  bool Write(byte data) {
-    m_items[m_write_pointer] = data;
-    m_write_pointer = (m_write_pointer + 1) % MAX_ITEMS;
-    return true;
-  }
-  bool Read(byte *data) {
-    *data = m_items[m_read_pointer];
-    m_read_pointer = (m_read_pointer + 1) % MAX_ITEMS;
-    return true;
-  }
-};
-
-class A2DSampler {
-  private:
-    static CircBuff& m_buff;
-    os_timer_t m_timer;
-  public:
-    A2DSampler(int samp_rate) {
+    ADCSampler() {
+      m_current_samples = 0;
+      m_samples_to_get = 0;
       os_timer_disarm(&m_timer);
       os_timer_setfn(&m_timer, (os_timer_func_t *)SampleCB, NULL); //pArg = NULL for now
-      os_timer_arm(&m_timer, samp_rate,  1); //repetitive
+    //  os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
     }
-    ~A2DSampler() {
+    ~ADCSampler() {
       os_timer_disarm(&m_timer);
     };
     static void SampleCB(void *pArg) {
-      m_buff.Write(analogRead(0));
-    }
-    void ReadNSamples(int num, byte* buff) {
-      for (int i=0; i< num; i++) {
-        m_buff.Read((byte*)(buff+i));
+      if (m_current_samples < m_samples_to_get) {
+        m_buff[m_current_samples++] = analogRead(0);
+      } else {
+        os_timer_disarm(&m_timer);
       }
+    }
+    bool StartSampling(int nsamps, int samp_rate_ms) {
+      if (nsamps > MAX_SAMPLES)
+        return false;
+      m_samples_to_get = nsamps;
+      m_samp_rate_ms = samp_rate_ms;
+      m_current_samples = 0;
+      os_timer_disarm(&m_timer);
+      os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
+      return true;
+    }
+    int GetNumAvailableSamples() {
+      return m_current_samples;
+    }
+    void ReadSamples(byte *buff) {
+      memcpy(buff, m_buff, m_current_samples);
     }
 };
 
-CircBuff samples_buff;
-CircBuff& A2DSampler::m_buff = samples_buff; 
-*/
+
+byte ADCSampler::m_buff[MAX_SAMPLES] = {0}; //up to 1000 samples
+os_timer_t ADCSampler::m_timer;
+int ADCSampler::m_current_samples = 0;
+int ADCSampler::m_samples_to_get = 0;
+
+ADCSampler sampler;
+
+
 class Blinker {
 
   public:
@@ -313,6 +313,7 @@ void ir_send_prot(int prot, unsigned int command, int nbits) {
 }
 
 unsigned int irSignalBuf[100]; //raw buffer for IR irsend.sendRaw()
+unsigned char samples[100]; //raw buffer for ADC samples sending
 
 void mqtt_debug_print( const char *msg ) {
     Serial.print(msg);
@@ -330,6 +331,9 @@ void mqtt_debug_println( const char *msg ) {
 #define MAX_PAYLOAD_LEN 100
 char strtok_payload[MAX_PAYLOAD_LEN];
 #define TOKEN_DELIM " \0\n"
+
+byte analog_samples_buff[1000]; 
+
 
 void callback(char* topic, byte* payload, unsigned int length) {
   if (length > MAX_PAYLOAD_LEN) {
@@ -354,6 +358,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
     char* token = strtok(strtok_payload, TOKEN_DELIM);
     Serial.println(String("first token (from payload) = ") + String(token));
+    /*******************************************************************************************/
     if (String(token) == "debug-topic") {
       token = strtok(NULL, TOKEN_DELIM);
       Serial.println("token = " + String(token));
@@ -364,6 +369,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       } else {
         Serial.println("Invalid debug-topic payload");
       }
+    /*******************************************************************************************/
     } else if (String(token) == "write") {
       token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
@@ -383,6 +389,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       } else {
         mqtt_debug_println("Invalid gpio_num argument to \"write\" topic");
       }
+    /*******************************************************************************************/
     } else if (String(token) == "read") {
       token = strtok(NULL, TOKEN_DELIM);
       if (token != NULL) {
@@ -394,7 +401,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
         if (token != NULL) {
           String restopic = String(token);
           mqtt_debug_print("Received command to read from GPIO# ");
-          mqtt_debug_println(String(gpio_num, DEC).c_str());
+          mqtt_debug_print(String(gpio_num, DEC).c_str());
+          mqtt_debug_print(" into result topic:");
+          mqtt_debug_println(restopic.c_str());
           pinMode(gpio_num, INPUT);
           if (restopic != "") {
             client.publish((get_full_hostname() + String("/") + restopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
@@ -406,25 +415,39 @@ void callback(char* topic, byte* payload, unsigned int length) {
         mqtt_debug_println("Invalid gpio_num argument to \"read\" topic");
       }
     } 
-#if 0    
-    else if (String(token) == "aread") { //A/D read
+    /*******************************************************************************************/
+    else if (String(token) == "startsamp") { //Start A/D sampling command
         token = strtok(NULL, TOKEN_DELIM);
         if (token != NULL) {
-          Serial.print("token = ");
-          Serial.println(token);
           int num = String(token).toInt();
-          Serial.print("Received command to read from A/D#0, num samples = ");
-          Serial.println(num);
-          if (outtopic != "") {
-            //client.publish((get_full_hostname() + String("/") + outtopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
-            //dump last N samples from A/D circular buffer
-          }
+          mqtt_debug_print("Received command to Start A/D#0, num samples = ");
+          mqtt_debug_print(String(num).c_str());
+          sampler.StartSampling(num, 10); //10 ms sampling rate
+          //client.publish((get_full_hostname() + String("/") + restopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
+          //dump last N samples from A/D circular buffer
         } else {
-          Serial.println("Invalid gpio_num argument to \"read\" topic");
+          mqtt_debug_println("Invalid num_samples argument for A/D start sampling command");
         }
-        
     } 
-#endif    
+    /*******************************************************************************************/
+    else if (String(token) == "dump") { //Dump all available A/D samples command
+        token = strtok(NULL, TOKEN_DELIM);
+        if (token != NULL) {
+          String restopic = String(token);
+          mqtt_debug_print("Received command to dump A/D#0 samples buffer ");
+          mqtt_debug_print(" into result topic:");
+          mqtt_debug_println(restopic.c_str());
+          sampler.ReadSamples(analog_samples_buff);
+          for (int i=0; i<sampler.GetNumAvailableSamples(); i++) {
+            mqtt_debug_print(String(analog_samples_buff[i]).c_str());
+          }
+          //client.publish((get_full_hostname() + String("/") + restopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
+          //dump last N samples from A/D circular buffer
+        } else {
+          mqtt_debug_println("Invalid restopic argumenr for A/D dump command");
+        }
+    } 
+    /*******************************************************************************************/
     else if (String(token) == "list") {
        //get result topic
       token = strtok(NULL, TOKEN_DELIM);
@@ -435,6 +458,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       } else {
         mqtt_debug_println("Invalid result_topic to list all existing GPIOs command");
       }
+    /*******************************************************************************************/
     } else if (String(token) == "irsendprot") {
       enum protocol prot;
       unsigned long command;
@@ -472,6 +496,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       String debug_str = String("Sending IR command on protocol ") + protocol_names_lut[prot] + String(": 0x") + String(command, HEX);
       mqtt_debug_println(debug_str.c_str());
       ir_send_prot(prot, command, nbits);
+    /*******************************************************************************************/
     } else if (String(token) == "irsendraw") {
       unsigned int nbits;
       unsigned int nitems;
@@ -506,6 +531,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
       }
       //sending the IR command
       irsend.sendRaw(irSignalBuf, nitems, freq);
+    /*******************************************************************************************/
     } else  {
       String debug_str = String("unknown command: ") + String((char*)payload);
       mqtt_debug_println(debug_str.c_str());
