@@ -60,58 +60,73 @@ int value = 0;
 //GPIO#                            0     1     2      3      4     5      6      7      8      9     10    11     12     13     14    15    16
 bool ESP12E_gpio_exist_list[] = { true, false, false, false, true, false, false, false, false, true, true, false, false, false, true, true, true };
 
+String get_full_hostname() {
+  String my_hostname(HOSTNAME);
+  my_hostname += String(ESP.getChipId(), HEX);
+  return my_hostname;
+}
+
 String debugtopic("");
 
 class ADCSampler {
   private:
-#define MAX_SAMPLES 1000
-    static byte m_buff[MAX_SAMPLES]; //up to 1000 samples
+#define PUBLISH_BUFF_SIZE MQTT_MAX_PACKET_SIZE
+    static char m_buff[PUBLISH_BUFF_SIZE]; //limited by MQTT library
     static os_timer_t m_timer;
-    static int m_current_samples;
-    static int m_samples_to_get;
-    int m_samp_rate_ms;
+    static int m_samp_rate_ms;
+    static String m_result_topic;
+    static int m_offset;
+    static int m_payload_max_size;
   public:
     ADCSampler() {
-      m_current_samples = 0;
-      m_samples_to_get = 0;
+      m_offset = 0;
+      memset(m_buff, 0, sizeof(m_buff));
       os_timer_disarm(&m_timer);
       os_timer_setfn(&m_timer, (os_timer_func_t *)SampleCB, NULL); //pArg = NULL for now
     //  os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
     }
     ~ADCSampler() {
-      os_timer_disarm(&m_timer);
-    };
-    static void SampleCB(void *pArg) {
-      if (m_current_samples < m_samples_to_get) {
-        m_buff[m_current_samples++] = analogRead(0);
-      } else {
         os_timer_disarm(&m_timer);
-      }
-    }
-    bool StartSampling(int nsamps, int samp_rate_ms) {
-      if (nsamps > MAX_SAMPLES)
-        return false;
-      m_samples_to_get = nsamps;
+    };
+ 
+    bool StartSampling(int samp_rate_ms, String& topic) {
+      m_offset = 0;
+      memset(m_buff, 0, sizeof(m_buff));
       m_samp_rate_ms = samp_rate_ms;
-      m_current_samples = 0;
+      m_result_topic = get_full_hostname() + String("/") + topic;
+      m_payload_max_size = MQTT_MAX_PACKET_SIZE-5-2 - m_result_topic.length();
       os_timer_disarm(&m_timer);
       os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
       return true;
     }
-    int GetNumAvailableSamples() {
-      return m_current_samples;
+    void StopSampling() {
+        os_timer_disarm(&m_timer);
     }
-    void ReadSamples(byte *buff) {
-      memcpy(buff, m_buff, m_current_samples);
+  private:
+    static void SampleCB(void *pArg) {
+//      static int counter = 0;
+      if (m_offset < m_payload_max_size-5) {
+        m_offset += sprintf(&m_buff[m_offset], "%d,", analogRead(0));
+      } else {
+        m_offset = 0;
+        memset(&m_buff[m_payload_max_size-5], 0, 5);
+//        if (!client.publish(m_result_topic.c_str(), /*m_buff, m_payload_max_size*/"Hello")) {
+//          Serial.println("Publish failed");
+//        }
+        Serial.println("published"+/*String(counter, DEC)+*/String(m_buff));
+//        counter++;
+        memset(m_buff, 0 , sizeof(m_buff));
+      }
     }
 };
 
 
-byte ADCSampler::m_buff[MAX_SAMPLES] = {0}; //up to 1000 samples
+char ADCSampler::m_buff[PUBLISH_BUFF_SIZE] = {0}; 
+String ADCSampler::m_result_topic("");
+int ADCSampler::m_offset = 0;
 os_timer_t ADCSampler::m_timer;
-int ADCSampler::m_current_samples = 0;
-int ADCSampler::m_samples_to_get = 0;
-
+int ADCSampler::m_payload_max_size = MQTT_MAX_PACKET_SIZE;
+int ADCSampler::m_samp_rate_ms = 1000;
 ADCSampler sampler;
 
 
@@ -183,11 +198,6 @@ int Blinker::m_led_gpio = -1;  //dummy value
 Blinker active_led(2); //Indicates connection to Wifi and connection to MQTT status
 
 
-String get_full_hostname() {
-  String my_hostname(HOSTNAME);
-  my_hostname += String(ESP.getChipId(), HEX);
-  return my_hostname;
-}
 
 String topic_cmd() {
   return get_full_hostname() + String("/cmd");
@@ -416,36 +426,21 @@ void callback(char* topic, byte* payload, unsigned int length) {
       }
     } 
     /*******************************************************************************************/
-    else if (String(token) == "startsamp") { //Start A/D sampling command
-        token = strtok(NULL, TOKEN_DELIM);
-        if (token != NULL) {
-          int num = String(token).toInt();
-          mqtt_debug_print("Received command to Start A/D#0, num samples = ");
-          mqtt_debug_print(String(num).c_str());
-          sampler.StartSampling(num, 10); //10 ms sampling rate
-          //client.publish((get_full_hostname() + String("/") + restopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
-          //dump last N samples from A/D circular buffer
-        } else {
-          mqtt_debug_println("Invalid num_samples argument for A/D start sampling command");
-        }
-    } 
-    /*******************************************************************************************/
-    else if (String(token) == "dump") { //Dump all available A/D samples command
+    else if (String(token) == "startA2D") { //Start A/D sampling command
         token = strtok(NULL, TOKEN_DELIM);
         if (token != NULL) {
           String restopic = String(token);
-          mqtt_debug_print("Received command to dump A/D#0 samples buffer ");
-          mqtt_debug_print(" into result topic:");
+          mqtt_debug_print("Received command to Start A/D#0");
+          mqtt_debug_print(" into result topic: ");
           mqtt_debug_println(restopic.c_str());
-          sampler.ReadSamples(analog_samples_buff);
-          for (int i=0; i<sampler.GetNumAvailableSamples(); i++) {
-            mqtt_debug_print(String(analog_samples_buff[i]).c_str());
+          sampler.StartSampling(10, restopic); //10 ms sampling rate
+          } else {
+            mqtt_debug_println("Invalid restopic argumenr for A/D startA2D command");
           }
-          //client.publish((get_full_hostname() + String("/") + restopic).c_str(), String(digitalRead(gpio_num) & 0x01, HEX).c_str()); //TODO
-          //dump last N samples from A/D circular buffer
-        } else {
-          mqtt_debug_println("Invalid restopic argumenr for A/D dump command");
-        }
+    } 
+    /*******************************************************************************************/
+    else if (String(token) == "stopA2D") { //Stop A/D sampling command
+        sampler.StopSampling(); 
     } 
     /*******************************************************************************************/
     else if (String(token) == "list") {
@@ -627,7 +622,6 @@ void loop() {
   client.loop();
   //run the led blink timer
 
-#if 0
   long now = millis();
   if (now - lastMsg > 2000) {
     lastMsg = now;
@@ -635,9 +629,10 @@ void loop() {
     snprintf (msg, 75, "hello from ESP #%ld", value);
     Serial.print("Publish message: ");
     Serial.println(msg);
-    client.publish("outTopic", msg);
+    if (!client.publish("outTopic", msg)) {
+      Serial.println("Publish failed");
+    }
   }
-#endif
   // Handle OTA server.
   ArduinoOTA.handle();
 
