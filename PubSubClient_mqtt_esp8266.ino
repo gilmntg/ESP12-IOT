@@ -68,19 +68,61 @@ String get_full_hostname() {
 
 String debugtopic("");
 
+
+class CyclicBuff {
+#define MAX_BUFF_SIZE 1000 //10 seconds of 10ms samples
+    int m_buff[MAX_BUFF_SIZE]; 
+    int m_num_items;
+    int m_write_pointer;
+    int m_read_pointer;
+  public:
+    CyclicBuff() : m_num_items(0), m_write_pointer(0), m_read_pointer(0) {
+      memset(m_buff, 0, sizeof(m_buff));
+    }
+    ~CyclicBuff() {};
+
+    bool Full() {
+      return m_num_items == MAX_BUFF_SIZE;
+    }
+    bool Empty() {
+      return m_num_items == 0;
+    }
+    int Available() {
+      return m_num_items;
+    }
+    bool Read(int& val) {
+      noInterrupts();
+      if (Empty()) {
+        interrupts();
+        return false;
+      }
+      val = m_buff[m_read_pointer];
+      m_read_pointer = (m_read_pointer+1) % MAX_BUFF_SIZE;
+      m_num_items--;
+      interrupts();
+      return true;
+    }
+    bool Write(int& val) {
+      noInterrupts();
+      if (Full()) {
+        interrupts();
+        return false;
+      }
+      m_buff[m_write_pointer] = val;
+      m_write_pointer = (m_write_pointer+1) % MAX_BUFF_SIZE;
+      m_num_items++;
+      interrupts();
+      return true;
+    }
+};
+int testcounter = 0;
 class ADCSampler {
-  private:
-#define PUBLISH_BUFF_SIZE MQTT_MAX_PACKET_SIZE
-    static char m_buff[PUBLISH_BUFF_SIZE]; //limited by MQTT library
+    static CyclicBuff* m_buff; 
     static os_timer_t m_timer;
     static int m_samp_rate_ms;
     static String m_result_topic;
-    static int m_offset;
-    static int m_payload_max_size;
   public:
     ADCSampler() {
-      m_offset = 0;
-      memset(m_buff, 0, sizeof(m_buff));
       os_timer_disarm(&m_timer);
       os_timer_setfn(&m_timer, (os_timer_func_t *)SampleCB, NULL); //pArg = NULL for now
     //  os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
@@ -90,11 +132,9 @@ class ADCSampler {
     };
  
     bool StartSampling(int samp_rate_ms, String& topic) {
-      m_offset = 0;
-      memset(m_buff, 0, sizeof(m_buff));
       m_samp_rate_ms = samp_rate_ms;
-      m_result_topic = get_full_hostname() + String("/") + topic;
-      m_payload_max_size = MQTT_MAX_PACKET_SIZE-5-2 - m_result_topic.length();
+      //m_result_topic = get_full_hostname() + String("/") + topic;
+      //m_payload_max_size = MQTT_MAX_PACKET_SIZE-5-2 - m_result_topic.length();
       os_timer_disarm(&m_timer);
       os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
       return true;
@@ -104,29 +144,15 @@ class ADCSampler {
     }
   private:
     static void SampleCB(void *pArg) {
-//      static int counter = 0;
-      if (m_offset < m_payload_max_size-5) {
-        m_offset += sprintf(&m_buff[m_offset], "%d,", analogRead(0));
-      } else {
-        m_offset = 0;
-        memset(&m_buff[m_payload_max_size-5], 0, 5);
-//        if (!client.publish(m_result_topic.c_str(), /*m_buff, m_payload_max_size*/"Hello")) {
-//          Serial.println("Publish failed");
-//        }
-        Serial.println("published"+/*String(counter, DEC)+*/String(m_buff));
-//        counter++;
-        memset(m_buff, 0 , sizeof(m_buff));
-      }
+      int sample = analogRead(0);
+      m_buff->Write(sample); //ignoring fullness here
     }
 };
-
-
-char ADCSampler::m_buff[PUBLISH_BUFF_SIZE] = {0}; 
-String ADCSampler::m_result_topic("");
-int ADCSampler::m_offset = 0;
+CyclicBuff samples_buff;
+CyclicBuff* ADCSampler::m_buff = &samples_buff;
 os_timer_t ADCSampler::m_timer;
-int ADCSampler::m_payload_max_size = MQTT_MAX_PACKET_SIZE;
 int ADCSampler::m_samp_rate_ms = 1000;
+
 ADCSampler sampler;
 
 
@@ -622,15 +648,43 @@ void loop() {
   client.loop();
   //run the led blink timer
 
+  String result_topic = get_full_hostname() + String("/") + String("adc");
+  int payload_size = MQTT_MAX_PACKET_SIZE-5-2 - result_topic.length() - 2;
   long now = millis();
   if (now - lastMsg > 2000) {
     lastMsg = now;
-    ++value;
-    snprintf (msg, 75, "hello from ESP #%ld", value);
-    Serial.print("Publish message: ");
-    Serial.println(msg);
-    if (!client.publish("outTopic", msg)) {
-      Serial.println("Publish failed");
+//    ++value;
+//    snprintf (msg, 75, "hello from ESP #%ld", value);
+//    Serial.print("Publish message: ");
+//    Serial.println(msg);
+//    if (!client.publish("outTopic", msg)) {
+//      Serial.println("Publish failed");
+//    }
+    if (samples_buff.Empty()) {
+      Serial.println("Nothing to publish");
+    }
+    while (samples_buff.Available() >= payload_size/2) { //each sample takes two chars
+      //publish a frame
+      int bytes_to_publish = payload_size;
+      Serial.println("Available = " + String(samples_buff.Available()));
+      char pub_msg[payload_size+2];
+      memset(pub_msg, 0, sizeof(pub_msg));
+      int i = 0;
+      while (bytes_to_publish > 0) { //some spare payload size to pad with '\0'
+        int sample;
+        if (samples_buff.Read(sample)) {
+          pub_msg[i++] = sample & 0xff;
+          pub_msg[i++] = (sample >> 8) & 0xff;
+          bytes_to_publish -= 2;
+        } else {
+          break;//while
+        }
+      }//while bytes_to_publish
+      Serial.println("publishing frame = " + String(pub_msg));
+      Serial.println("Into topic:" + result_topic);
+      if (!client.publish(result_topic.c_str(), pub_msg)) {
+        Serial.println("Publish failed");
+      }
     }
   }
   // Handle OTA server.
