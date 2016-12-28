@@ -115,7 +115,6 @@ class CyclicBuff {
       return true;
     }
 };
-int testcounter = 0;
 class ADCSampler {
     static CyclicBuff* m_buff; 
     static os_timer_t m_timer;
@@ -145,6 +144,10 @@ class ADCSampler {
   private:
     static void SampleCB(void *pArg) {
       int sample = analogRead(0);
+      //modify the sample so it would never have '0' bytes in its payload
+      //'0' do not pass correctly in strings...
+      sample <<= 2;
+      sample += 0xf003;
       m_buff->Write(sample); //ignoring fullness here
     }
 };
@@ -682,7 +685,7 @@ void loop() {
       }//while bytes_to_publish
       Serial.println("publishing frame = " + String(pub_msg));
       Serial.println("Into topic:" + result_topic);
-      if (!client.publish(result_topic.c_str(), pub_msg)) {
+      if (!client.publish(result_topic.c_str(), pub_msg, payload_size)) {
         Serial.println("Publish failed");
       }
     }
