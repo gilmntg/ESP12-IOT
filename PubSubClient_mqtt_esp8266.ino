@@ -40,25 +40,22 @@ extern "C" {
 
 #include <IRremoteESP8266.h>
 
-
-
 #define HOSTNAME "ESP12E-" ///< Hostename. The setup function adds the Chip ID at the end
 // Update these with values suitable for your network.
 
-const char* ssid = "gmontag-room";
-const char* password = "gm3351324";
+//const char* ssid = "gmontag-room";
+//const char* password = "gm3351324";
 const char* mqtt_server = "raspberrypi-desktop";
 
 
 WiFiClient espClient;
 PubSubClient client(espClient);
+
+
 long lastMsg = 0;
 char msg[50];
 int value = 0;
 
-
-//GPIO#                            0     1     2      3      4     5      6      7      8      9     10    11     12     13     14    15    16
-bool ESP12E_gpio_exist_list[] = { true, false, false, false, true, false, false, false, false, true, true, false, false, false, true, true, true };
 
 String get_full_hostname() {
   String my_hostname(HOSTNAME);
@@ -68,6 +65,55 @@ String get_full_hostname() {
 
 String debugtopic("");
 
+class WiFiScanner {
+  struct {
+    char ssid[50];
+    int rssi;
+  } m_scanResults[10];
+  int m_numNetworksFound;
+    
+  public:
+    WiFiScanner() {
+      WiFi.mode(WIFI_STA);
+      WiFi.disconnect();
+      delay(100);
+      m_numNetworksFound = 0;
+      memset(m_scanResults, 0, sizeof(m_scanResults));
+    };
+    ~WiFiScanner() {};
+
+    int ScanNetworks() {
+        memset(m_scanResults, 0, sizeof(m_scanResults));
+        m_numNetworksFound = WiFi.scanNetworks();
+        Serial.println("scan done");
+        if (m_numNetworksFound == 0) {
+          Serial.println("no networks found");
+          return 0;
+        }  else {
+          Serial.print(m_numNetworksFound);
+          Serial.println(" networks found");
+          for (int i = 0; i < m_numNetworksFound; ++i)
+          {
+            // SSID and RSSI for each network found
+            m_scanResults[i].rssi = WiFi.RSSI(i); 
+            strcpy(m_scanResults[i].ssid, WiFi.SSID(i).c_str()); 
+          }
+          return m_numNetworksFound;
+        }
+    }
+
+    char* GetBestNetworkSsid() {
+      int maxRssi = -32767;
+      int maxIndex = 0;
+      for (int i=0; i<m_numNetworksFound; i++) {
+        if (m_scanResults[i].rssi >= maxRssi) {
+          maxRssi = m_scanResults[i].rssi;
+          maxIndex = i;
+        }
+      }
+      return m_scanResults[maxIndex].ssid;
+    }
+};
 
 class CyclicBuff {
 #define MAX_BUFF_SIZE 1000 //10 seconds of 10ms samples
@@ -115,6 +161,10 @@ class CyclicBuff {
       return true;
     }
 };
+
+//instantiate the class
+CyclicBuff samples_buff;
+
 class ADCSampler {
     static CyclicBuff* m_buff; 
     static os_timer_t m_timer;
@@ -144,20 +194,22 @@ class ADCSampler {
   private:
     static void SampleCB(void *pArg) {
       int sample = analogRead(0);
-      //modify the sample so it would never have '0' bytes in its payload
-      //'0' do not pass correctly in strings...
+      //modify the sample so it would never have \0 bytes in its payload
+      //\0 do not pass correctly in strings...
+      //The client receiving the sample, needs to to the reverse of this operation to resotre the sample value
       sample <<= 2;
       sample += 0xf003;
       m_buff->Write(sample); //ignoring fullness here
     }
 };
-CyclicBuff samples_buff;
+
+//statics
 CyclicBuff* ADCSampler::m_buff = &samples_buff;
 os_timer_t ADCSampler::m_timer;
 int ADCSampler::m_samp_rate_ms = 1000;
 
+//instantiate the class
 ADCSampler sampler;
-
 
 class Blinker {
 
@@ -221,36 +273,31 @@ class Blinker {
     }
 };
 
+//statics
 Blinker::LedState Blinker::m_led_state = Blinker::LED_STATE_OFF;
 int Blinker::m_led_gpio = -1;  //dummy value
 
+//instantiate the class
 Blinker active_led(2); //Indicates connection to Wifi and connection to MQTT status
-
-
 
 String topic_cmd() {
   return get_full_hostname() + String("/cmd");
 }
 
-String gpio_list_payload() {
-  String tmp("");
-  for (int i = 0; i < sizeof(ESP12E_gpio_exist_list) / sizeof(bool); i++) {
-    if (ESP12E_gpio_exist_list[i]) {
-      tmp += String(i, HEX);
-      tmp += String(",");
-    }
-  }
-  return tmp;
-}
-
 void setup_wifi() {
+  char* ssid;
+  const char* password = "gm3351324";
+  int numNetworks;
 
-  delay(10);
-  // We start by connecting to a WiFi network
-  Serial.println();
-  Serial.print("Connecting to ");
+  WiFiScanner wifi_scanner;
+
+  numNetworks = wifi_scanner.ScanNetworks();
+  Serial.print("Found ");
+  Serial.print(numNetworks);
+  Serial.println(" Networks");
+  ssid = wifi_scanner.GetBestNetworkSsid();
+  Serial.print("Best network is: ");
   Serial.println(ssid);
-
 
   WiFi.begin(ssid, password);
 
@@ -263,6 +310,26 @@ void setup_wifi() {
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
+  
+#if 0
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+#endif
+  
 }
 
 String build_payload_string(byte* payload, unsigned int length) {
@@ -470,20 +537,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
     /*******************************************************************************************/
     else if (String(token) == "stopA2D") { //Stop A/D sampling command
         sampler.StopSampling(); 
-    } 
+    }
     /*******************************************************************************************/
-    else if (String(token) == "list") {
-       //get result topic
-      token = strtok(NULL, TOKEN_DELIM);
-      if (token != NULL) {
-        String restopic = String(topic);
-        mqtt_debug_println("Received command to list all existing GPIOs");
-        client.publish((get_full_hostname() + String("/") + restopic).c_str(), gpio_list_payload().c_str());
-      } else {
-        mqtt_debug_println("Invalid result_topic to list all existing GPIOs command");
-      }
-    /*******************************************************************************************/
-    } else if (String(token) == "irsendprot") {
+    else if (String(token) == "irsendprot") {
       enum protocol prot;
       unsigned long command;
       unsigned int nbits;
@@ -616,7 +672,7 @@ void setup() {
   WiFi.hostname(hostname);
 
   // Print hostname.
-  Serial.println("Hostname: " + hostname);
+  Serial.println("Hostname: " + WiFi.hostname());
   //Serial.println(WiFi.hostname());
 
   // Start OTA server.
