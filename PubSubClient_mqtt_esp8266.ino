@@ -165,114 +165,6 @@ class CyclicBuff {
 //instantiate the class
 CyclicBuff samples_buff;
 
-struct time_s {
-  
-  unsigned int year;
-  unsigned int dayOfMonth;
-  unsigned int dayOfWeek;
-  unsigned int hour;
-  unsigned int minute;
-  unsigned int second;
-};
-
-class NTPClient {
-    static os_timer_t m_timer;
-    static unsigned long m_epoch;
-    static const unsigned int localPort = 2390;      // local port to listen for UDP packets
-    /* Don't hardwire the IP address or we won't get the benefits of the pool.
-     *  Lookup the IP address for the host name instead */
-    //IPAddress timeServer(129, 6, 15, 28); // time.nist.gov NTP server
-    static const char* m_ntpServerName;
-    static const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
-    static byte m_packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
-
-    // A UDP instance to let us send and receive packets over UDP
-    static WiFiUDP m_udp;
-
-public:    
-    NTPClient(const char* serverName) {
-      m_ntpServerName = serverName;      
-      os_timer_disarm(&m_timer);
-      os_timer_setfn(&m_timer, (os_timer_func_t *)NtpCB, NULL); //pArg = NULL for now
-      os_timer_arm(&m_timer, 10000,  1); //repetitive, every 10 seconds
-    };
-    ~NTPClient() {
-        os_timer_disarm(&m_timer);
-    };
-    static void NtpCB(void *pArg) {
-      //read and store last sample (if available)
-      int cb = m_udp.parsePacket();
-      if (!cb) {
-        Serial.println("no packet yet");
-      }
-      else {
-        // We've received a packet, read the data from it
-        m_udp.read(m_packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
-        //the timestamp starts at byte 40 of the received packet and is four bytes,
-        // or two words, long. First, esxtract the two words:
-        unsigned long highWord = word(m_packetBuffer[40], m_packetBuffer[41]);
-        unsigned long lowWord = word(m_packetBuffer[42], m_packetBuffer[43]);
-        // combine the four bytes (two words) into a long integer
-        // this is NTP time (seconds since Jan 1 1900):
-        unsigned long secsSince1900 = highWord << 16 | lowWord;
-        Serial.print("Seconds since Jan 1 1900 = " );
-        Serial.println(secsSince1900);
-        // now convert NTP time into everyday time:
-        Serial.print("Unix time = ");
-        // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
-        const unsigned long seventyYears = 2208988800UL;
-        // subtract seventy years:
-        unsigned long epoch = secsSince1900 - seventyYears;
-        // print Unix time:
-        Serial.println(epoch);
-        m_epoch = epoch;
-      }
-      //send a new request to the pool
-      //get a random server from the pool
-      IPAddress timeServerIP; // time.nist.gov NTP server address
-      WiFi.hostByName(m_ntpServerName, timeServerIP); 
-      Serial.print("sending NTP packet to server name: ");
-      Serial.print(m_ntpServerName);
-      Serial.print(" IP:");
-      Serial.print(timeServerIP);
-      Serial.println("...");
-      // set all bytes in the buffer to 0
-      memset(m_packetBuffer, 0, NTP_PACKET_SIZE);
-      // Initialize values needed to form NTP request
-      // (see URL above for details on the packets)
-      m_packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-      m_packetBuffer[1] = 0;     // Stratum, or type of clock
-      m_packetBuffer[2] = 6;     // Polling Interval
-      m_packetBuffer[3] = 0xEC;  // Peer Clock Precision
-      // 8 bytes of zero for Root Delay & Root Dispersion
-      m_packetBuffer[12]  = 49;
-      m_packetBuffer[13]  = 0x4E;
-      m_packetBuffer[14]  = 49;
-      m_packetBuffer[15]  = 52;
-  
-      // all NTP fields have been given values, now
-      // you can send a packet requesting a timestamp:
-      m_udp.beginPacket(timeServerIP, 123); //NTP requests are to port 123
-      m_udp.write(m_packetBuffer, NTP_PACKET_SIZE);
-      m_udp.endPacket();
-    };
-
-    unsigned long GetUnixTime() {
-      return m_epoch;
-    };
-
-private:
-  unsigned long secondsSince1900;
-};
-
-os_timer_t NTPClient::m_timer;
-const char* NTPClient::m_ntpServerName = "";
-WiFiUDP NTPClient::m_udp;
-byte NTPClient::m_packetBuffer[ NTP_PACKET_SIZE ] = { 0 };
-unsigned long NTPClient::m_epoch;
-
-
-NTPClient ntpClient("0.asia.pool.ntp.org");
 
 class ADCSampler {
     static CyclicBuff* m_buff; 
@@ -524,7 +416,9 @@ void ir_send_prot(int prot, unsigned int command, int nbits) {
   }//switch
 }
 
-unsigned int irSignalBuf[100]; //raw buffer for IR irsend.sendRaw()
+#define IRSIGNAL_MAX_LEN 256
+unsigned int irSignalBuf[IRSIGNAL_MAX_LEN]; //raw buffer for IR irsend.sendRaw()
+unsigned int irSignalBufLen;
 unsigned char samples[100]; //raw buffer for ADC samples sending
 
 void mqtt_debug_print( const char *msg ) {
@@ -688,40 +582,25 @@ void callback(char* topic, byte* payload, unsigned int length) {
       mqtt_debug_println(debug_str.c_str());
       ir_send_prot(prot, command, nbits);
     /*******************************************************************************************/
-    } else if (String(token) == "irsendraw") {
-      unsigned int nbits;
-      unsigned int nitems;
-      unsigned int freq;
-      
-      memset(irSignalBuf, 0, sizeof(irSignalBuf));
-      //parsing nitems
-      token = strtok(NULL, TOKEN_DELIM);
-      if (token != NULL) {
-        nitems = String(token).toInt();
-        if ((nitems > 100) || (nitems < 0)) {
-          mqtt_debug_println("Invalid nutems value");
-          return;
+    } else if (String(token) == "irrawbegin") {
+        memset(irSignalBuf, 0, sizeof(irSignalBuf));
+        irSignalBufLen = 0;
+    /*******************************************************************************************/
+    } else if (String(token) == "irrawpart") {
+      while (irSignalBufLen < IRSIGNAL_MAX_LEN) {
+        token = strtok(NULL, TOKEN_DELIM);
+        if ((token == NULL) || (token == "")) {
+          break;
         }
-        for (int i=0; i<nitems; i++) {
-          token = strtok(NULL, TOKEN_DELIM);
-          if (token != NULL) {
-            irSignalBuf[i] = String(token).toInt();
-          }
-        }
-      } else {
-        mqtt_debug_println("Expected a valid npairs parameter");
-        return;
-      }
-      //parsing freq kHz
-      token = strtok(NULL, TOKEN_DELIM);
-      if (token != NULL) {
-        freq = String(token).toInt();
-      } else {
-        mqtt_debug_println("Expected a valid frequency parameter");
-        return;
-      }
-      //sending the IR command
-      irsend.sendRaw(irSignalBuf, nitems, freq);
+        irSignalBuf[irSignalBufLen++] = String(token).toInt();
+      };
+    /*******************************************************************************************/
+    } else if (String(token) == "irrawend") {
+//        for (int i=0; i<irSignalBufLen; i++) {
+//          Serial.print(irSignalBuf[i]);
+//          Serial.print(" ");    
+//        }
+        irsend.sendRaw(irSignalBuf, irSignalBufLen, 38);
     /*******************************************************************************************/
     } else  {
       String debug_str = String("unknown command: ") + String((char*)payload);
@@ -811,9 +690,9 @@ void loop() {
 
   String result_topic = get_full_hostname() + String("/") + String("adc");
   int payload_size = MQTT_MAX_PACKET_SIZE-5-2 - result_topic.length() - 2;
-  long now = millis();
-  if (now - lastMsg > 2000) {
-    lastMsg = now;
+//  long now = millis();
+//  if (now - lastMsg > 2000) {
+//    lastMsg = now;
 //    ++value;
 //    snprintf (msg, 75, "hello from ESP #%ld", value);
 //    Serial.print("Publish message: ");
@@ -821,9 +700,10 @@ void loop() {
 //    if (!client.publish("outTopic", msg)) {
 //      Serial.println("Publish failed");
 //    }
-    if (samples_buff.Empty()) {
-      Serial.println("Nothing to publish");
-    }
+//    if (samples_buff.Empty()) {
+//      Serial.println("Nothing to publish");
+//    }
+//  }
     while (samples_buff.Available() >= payload_size/2) { //each sample takes two chars
       //publish a frame
       int bytes_to_publish = payload_size;
@@ -847,7 +727,6 @@ void loop() {
         Serial.println("Publish failed");
       }
     }
-  }
   // Handle OTA server.
   ArduinoOTA.handle();
 
