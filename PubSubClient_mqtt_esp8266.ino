@@ -163,34 +163,73 @@ class CyclicBuff {
 };
 
 //instantiate the class
-CyclicBuff samples_buff;
+CyclicBuff samples_cyc_buff;
 
+static void OSTimerBaseCB(void *pArg);
 
-class ADCSampler {
-    static CyclicBuff* m_buff; 
-    static os_timer_t m_timer;
-    static int m_samp_rate_ms;
+class OSTimerBase {
+    os_timer_t m_timer;
+    int m_rate_ms;
   public:
-    ADCSampler() {
+    OSTimerBase() 
+      : m_rate_ms(0) {
       os_timer_disarm(&m_timer);
-      os_timer_setfn(&m_timer, (os_timer_func_t *)SampleCB, NULL); //pArg = NULL for now
-    //  os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
+      os_timer_setfn(&m_timer, (os_timer_func_t *)OSTimerBaseCB, this);
     }
-    ~ADCSampler() {
+    virtual ~OSTimerBase() {
         os_timer_disarm(&m_timer);
     };
- 
-    bool StartSampling(int samp_rate_ms) {
-      m_samp_rate_ms = samp_rate_ms;
-      os_timer_disarm(&m_timer);
-      os_timer_arm(&m_timer, m_samp_rate_ms,  1); //repetitive
-      return true;
+    void SetRate( int rate_ms ) {
+      m_rate_ms = rate_ms;
     }
-    void StopSampling() {
+    bool Start() {
+      if (m_rate_ms != 0) {
+        os_timer_disarm(&m_timer);
+        os_timer_arm(&m_timer, m_rate_ms,  1); //repetitive
+        return true;
+      } else {
+          Serial.println("OSTimerBase::Start() Failed: m_rate_ms = 0!");
+        return false;
+      }
+    }
+    void Stop() {
         os_timer_disarm(&m_timer);
     }
-  private:
-    static void SampleCB(void *pArg) {
+    //The actual work is delegated to the derived classes
+    virtual void DoTheWork() = 0;
+};
+
+static void OSTimerBaseCB( void *pArg) {
+  ((OSTimerBase*)pArg)->DoTheWork();
+};
+ 
+static void SampleCB(void *pArg);
+
+class ADCSampler : public OSTimerBase {
+    CyclicBuff* m_buff; 
+  public:
+    ADCSampler(CyclicBuff* p_buff) {
+      m_buff = p_buff;
+      Stop();
+    };
+    ~ADCSampler() {
+        Stop();
+    };
+    CyclicBuff* GetBuffPtr() {
+      return m_buff;
+    };
+  
+    bool StartSampling(int samp_rate_ms) {
+      SetRate(samp_rate_ms);
+      Start();
+      return true;
+    };
+    void StopSampling() {
+        Stop();
+    };
+   private:
+    //override
+    void DoTheWork() {
       int sample = analogRead(0);
       //modify the sample so it would never have \0 bytes in its payload
       //"\0" do not pass correctly in strings...
@@ -202,78 +241,72 @@ class ADCSampler {
 };
 
 //statics
-CyclicBuff* ADCSampler::m_buff = &samples_buff;
-os_timer_t ADCSampler::m_timer;
-int ADCSampler::m_samp_rate_ms = 1000;
+//CyclicBuff* ADCSampler::m_buff = &samples_buff;
+//os_timer_t ADCSampler::m_timer;
+//int ADCSampler::m_samp_rate_ms = 1000;
 
 //instantiate the class
-ADCSampler sampler;
+ADCSampler sampler(&samples_cyc_buff);
 
-class Blinker {
+class Blinker : public OSTimerBase {
 
   public:
     enum  BlinkRate { BLINK_RATE_OFF, BLINK_RATE_SLOW, BLINK_RATE_FAST, BLINK_RATE_ON };
     enum  LedState  { LED_STATE_OFF = 1, LED_STATE_ON = 0 };
 
   private:
-    static LedState m_led_state;
+    LedState m_led_state;
     enum Timeout { SLOW_RATE_TIMEOUT = 500, FAST_RATE_TIMEOUT = 100 };
-    static int m_led_gpio;
-//    int m_timer_num;
-    os_timer_t m_timer;
-
-
+    int m_led_gpio;
   public:
     Blinker(int gpio_num) {
       m_led_gpio = gpio_num;
       m_led_state = LED_STATE_OFF;
       pinMode(m_led_gpio, OUTPUT);
       digitalWrite(m_led_gpio, m_led_state);
-    }
+    };
     ~Blinker() {
-      os_timer_disarm(&m_timer);
       m_led_state = LED_STATE_OFF;
       digitalWrite(m_led_gpio, m_led_state);
     };
-    void SetRate(BlinkRate r) {
+    void SetBlinkRate(BlinkRate r) {
       switch (r) {
         case BLINK_RATE_OFF:
-          os_timer_disarm(&m_timer);
+          Stop();
           m_led_state = LED_STATE_OFF;
           digitalWrite(m_led_gpio, m_led_state);
           break;
         case BLINK_RATE_SLOW:
-          os_timer_disarm(&m_timer);
-          os_timer_setfn(&m_timer, (os_timer_func_t *)ToggleLed, NULL); //pArg = NULL for now
-          os_timer_arm(&m_timer, SLOW_RATE_TIMEOUT,  1); //repetitive
+          Stop();
+          SetRate(SLOW_RATE_TIMEOUT);
+          Start();
           break;
         case BLINK_RATE_FAST:
-            os_timer_disarm(&m_timer);
-            os_timer_setfn(&m_timer, (os_timer_func_t *)ToggleLed, NULL); //pArg = NULL for now
-            os_timer_arm(&m_timer, FAST_RATE_TIMEOUT,  1); //repetitive
+            Stop();
+            SetRate(FAST_RATE_TIMEOUT);
+            Start();
           break;
         case BLINK_RATE_ON:
-          os_timer_disarm(&m_timer);
+          Stop();
           m_led_state = LED_STATE_ON;
           digitalWrite(m_led_gpio, m_led_state);
           break;
       }
+    };
+    //override
+    void DoTheWork() {
+      ToggleLed();
     }
-
   private:
-    static void ToggleLed(void *pArg) {
+     void ToggleLed() {
       if (m_led_state == LED_STATE_OFF) {
         m_led_state = LED_STATE_ON;
       } else {
         m_led_state = LED_STATE_OFF;
       }
       digitalWrite(m_led_gpio, m_led_state);
-    }
+    };
 };
-
-//statics
-Blinker::LedState Blinker::m_led_state = Blinker::LED_STATE_OFF;
-int Blinker::m_led_gpio = -1;  //dummy value
 
 //instantiate the class
 Blinker active_led(2); //Indicates connection to Wifi and connection to MQTT status
@@ -373,7 +406,8 @@ int get_protocol_from_name(String& name) {
     }
   }
   return PROT_UNDEFINED;
-}
+};
+
 IRsend irsend(5); //using GPIO5 for IR
 
 void ir_send_prot(int prot, unsigned int command, int nbits) {
@@ -419,7 +453,6 @@ void ir_send_prot(int prot, unsigned int command, int nbits) {
 #define IRSIGNAL_MAX_LEN 256
 unsigned int irSignalBuf[IRSIGNAL_MAX_LEN]; //raw buffer for IR irsend.sendRaw()
 unsigned int irSignalBufLen;
-unsigned char samples[100]; //raw buffer for ADC samples sending
 
 void mqtt_debug_print( const char *msg ) {
     Serial.print(msg);
@@ -437,9 +470,6 @@ void mqtt_debug_println( const char *msg ) {
 #define MAX_PAYLOAD_LEN 100
 char strtok_payload[MAX_PAYLOAD_LEN];
 #define TOKEN_DELIM " \0\n"
-
-byte analog_samples_buff[1000]; 
-
 
 void callback(char* topic, byte* payload, unsigned int length) {
   if (length > MAX_PAYLOAD_LEN) {
@@ -612,7 +642,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 void reconnect() {
 
   // Loop until we're reconnected
-  active_led.SetRate(Blinker::BLINK_RATE_FAST);
+  active_led.SetBlinkRate(Blinker::BLINK_RATE_FAST);
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
@@ -633,7 +663,7 @@ void reconnect() {
       delay(5000);
     }
   }
-  active_led.SetRate(Blinker::BLINK_RATE_ON);
+  active_led.SetBlinkRate(Blinker::BLINK_RATE_ON);
 }
 
 
@@ -641,7 +671,7 @@ void setup() {
 
   irsend.begin();
 
-  active_led.SetRate(Blinker::BLINK_RATE_OFF);
+  active_led.SetBlinkRate(Blinker::BLINK_RATE_OFF);
 
   Serial.println("\r\n");
   Serial.print("Chip ID: 0x");
@@ -667,9 +697,9 @@ void setup() {
   client.setCallback(callback);
   client.setServer(mqtt_server, 1883);
 
-  active_led.SetRate(Blinker::BLINK_RATE_SLOW);
+  active_led.SetBlinkRate(Blinker::BLINK_RATE_SLOW);
   setup_wifi();
-  active_led.SetRate(Blinker::BLINK_RATE_FAST);
+  active_led.SetBlinkRate(Blinker::BLINK_RATE_FAST);
 
 //  A2DSampler a2d_sampler(10);
 }
@@ -700,20 +730,20 @@ void loop() {
 //    if (!client.publish("outTopic", msg)) {
 //      Serial.println("Publish failed");
 //    }
-//    if (samples_buff.Empty()) {
+//    if (samples_cyc_buff.Empty()) {
 //      Serial.println("Nothing to publish");
 //    }
 //  }
-    while (samples_buff.Available() >= payload_size/2) { //each sample takes two chars
+    while (samples_cyc_buff.Available() >= payload_size/2) { //each sample takes two chars
       //publish a frame
       int bytes_to_publish = payload_size;
-      Serial.println("Available = " + String(samples_buff.Available()));
+      Serial.println("Available = " + String(samples_cyc_buff.Available()));
       char pub_msg[payload_size+2];
       memset(pub_msg, 0, sizeof(pub_msg));
       int i = 0;
       while (bytes_to_publish > 0) { //some spare payload size to pad with '\0'
         int sample;
-        if (samples_buff.Read(sample)) {
+        if (samples_cyc_buff.Read(sample)) {
           pub_msg[i++] = sample & 0xff;
           pub_msg[i++] = (sample >> 8) & 0xff;
           bytes_to_publish -= 2;
