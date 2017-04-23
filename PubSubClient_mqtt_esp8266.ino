@@ -33,6 +33,7 @@
 #include <FS.h>
 #include <ArduinoOTA.h>
 #include "SimpleTimer.h"
+#include <EEPROM.h>
 
 extern "C" {
 #include "user_interface.h"
@@ -64,6 +65,87 @@ String get_full_hostname() {
 }
 
 String debugtopic("");
+class EepromData {
+  struct ap_details_t {
+    char ssid[50];
+    char password[50];
+  };
+  struct {
+    char chip_id[10]; //used to mark a valid Eeprom data
+    ap_details_t ap_list[3];
+    char mqtt_host_name[50];
+  } m_data;
+
+  bool m_valid;
+  
+  EepromData() {
+    m_valid = false;
+    int address = 0;
+    memset((void *)&m_data, 0, sizeof(m_data));
+    EEPROM.begin(sizeof(m_data));
+    for (int i=0; i < sizeof(m_data.chip_id); i++) {
+      m_data.chip_id[i] = EEPROM.read(address);
+      address++;
+    }
+    const char* chip_id_str = String(ESP.getChipId(), HEX).c_str();
+    if (!memcmp(m_data.chip_id, chip_id_str, strlen(chip_id_str))) {
+      m_valid = true;
+      for (int i=0; i < 3; i++) {
+        for (int j=0; j<50; j++) {
+          m_data.ap_list[i].ssid[j] = EEPROM.read(address);
+          address++;
+        }
+        for (int j=0; j<50; j++) {
+          m_data.ap_list[i].password[j] = EEPROM.read(address);
+          address++;
+        }
+      }
+      for (int i=0; i < 50; i++) {
+        m_data.mqtt_host_name[i] = EEPROM.read(address);
+        address++;
+      }
+    }
+  }
+  ~EepromData() {}
+  
+  bool IsValid() {
+    return m_valid;
+  }
+  ap_details_t GetApDetails(int num) {
+    ap_details_t temp_ap;
+    memset((void *)&temp_ap, 0, sizeof(temp_ap));
+    strcpy(temp_ap.ssid, m_data.ap_list[num].ssid);
+    strcpy(temp_ap.password, m_data.ap_list[num].password);
+    return temp_ap;
+  }
+  void SetApDetails(int num, ap_details_t details) {
+    memset(&m_data.ap_list[num], 0, sizeof(ap_details_t));
+    strcpy(m_data.ap_list[num].ssid, details.ssid);
+    strcpy(m_data.ap_list[num].password, details.password);
+  }
+
+  void GetMqttHostName(char* hostname) {
+    strcpy(hostname, m_data.mqtt_host_name);
+  }
+  void Commit() {
+    int address = 0;
+    for (int i=0; i < 3; i++) {
+      for (int j=0; j<50; j++) {
+        EEPROM.write(address, m_data.ap_list[i].ssid[j]);
+        address++;
+      }
+      for (int j=0; j<50; j++) {
+        EEPROM.write(address, m_data.ap_list[i].password[j]);
+        address++;
+      }
+    }
+    for (int i=0; i < 50; i++) {
+      EEPROM.write(address, m_data.mqtt_host_name[i]);
+      address++;
+    }
+    EEPROM.commit();
+  }
+};
 
 class WiFiScanner {
   struct {
@@ -669,7 +751,12 @@ void reconnect() {
 
 void setup() {
 
+  Serial.begin(115200);
+
+  EEPROM.begin(4);
+
   irsend.begin();
+  
 
   active_led.SetBlinkRate(Blinker::BLINK_RATE_OFF);
 
@@ -692,7 +779,6 @@ void setup() {
   ArduinoOTA.begin();
 
   pinMode(2, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
-  Serial.begin(115200);
 
   client.setCallback(callback);
   client.setServer(mqtt_server, 1883);
@@ -717,6 +803,17 @@ void loop() {
 
   client.loop();
   //run the led blink timer
+
+  long now = millis();
+  static long last;
+  if (now - last > 2000) {
+    last = now;
+    int val = EEPROM.read(0);
+    EEPROM.write(0, val+1);
+    EEPROM.commit();
+    Serial.print("EEPROM value = ");
+    Serial.println(val);
+  }
 
   String result_topic = get_full_hostname() + String("/") + String("adc");
   int payload_size = MQTT_MAX_PACKET_SIZE-5-2 - result_topic.length() - 2;
