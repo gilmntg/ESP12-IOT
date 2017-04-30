@@ -65,92 +65,113 @@ String get_full_hostname() {
 }
 
 String debugtopic("");
+
 class EepromData {
-  struct ap_details_t {
-    char ssid[50];
-    char password[50];
-  };
-  struct {
-    char chip_id[10]; //used to mark a valid Eeprom data
-    ap_details_t ap_list[3];
-    char mqtt_host_name[50];
-  } m_data;
 
-  bool m_valid;
+  public:
+    struct ApCred {
+      String ssid;
+      String password;
+    };
+  #define EEPROM_MAGIC 0x07121960  
+    enum { ApListSize=3, SsidStrLen=32, PassStrLen=32, MqttHostName=32 };
+  private:
+    struct {
+      int magic;
+      ApCred ap_list[ApListSize];
+      String mqtt_host_name;
+    } m_data;
+    bool m_cached;
+    
+  public:
+    EepromData() {
+      m_data.magic = 0;
+      m_cached = false;
+    }
+    ~EepromData() {}
   
-  EepromData() {
-    m_valid = false;
-    int address = 0;
-    memset((void *)&m_data, 0, sizeof(m_data));
-    EEPROM.begin(sizeof(m_data));
-    for (int i=0; i < sizeof(m_data.chip_id); i++) {
-      m_data.chip_id[i] = EEPROM.read(address);
-      address++;
-    }
-    const char* chip_id_str = String(ESP.getChipId(), HEX).c_str();
-    if (!memcmp(m_data.chip_id, chip_id_str, strlen(chip_id_str))) {
-      m_valid = true;
-      for (int i=0; i < 3; i++) {
-        for (int j=0; j<50; j++) {
-          m_data.ap_list[i].ssid[j] = EEPROM.read(address);
-          address++;
+    void Begin() {
+      EEPROM.begin(sizeof(m_data));
+      int address = 0;
+      //read magic
+      m_data.magic |= (int)EEPROM.read(address++) << 24;
+      m_data.magic |= (int)EEPROM.read(address++) << 16;
+      m_data.magic |= (int)EEPROM.read(address++) << 8;
+      m_data.magic |= (int)EEPROM.read(address++) << 0;
+      for (int i=0; i < ApListSize; i++) {
+        //read ssid
+        for (int j=0; j<SsidStrLen; j++) {
+          m_data.ap_list[i].ssid += (char)EEPROM.read(address++);
         }
-        for (int j=0; j<50; j++) {
-          m_data.ap_list[i].password[j] = EEPROM.read(address);
-          address++;
+        //read password
+        for (int j=0; j<PassStrLen; j++) {
+          m_data.ap_list[i].password += (char)EEPROM.read(address++);
         }
       }
-      for (int i=0; i < 50; i++) {
-        m_data.mqtt_host_name[i] = EEPROM.read(address);
-        address++;
+      for (int i=0; i<MqttHostName; i++) {
+        m_data.mqtt_host_name += (char)EEPROM.read(address++);
       }
+      m_cached = true;
     }
-  }
-  ~EepromData() {}
+    
   
-  bool IsValid() {
-    return m_valid;
-  }
-  ap_details_t GetApDetails(int num) {
-    ap_details_t temp_ap;
-    memset((void *)&temp_ap, 0, sizeof(temp_ap));
-    strcpy(temp_ap.ssid, m_data.ap_list[num].ssid);
-    strcpy(temp_ap.password, m_data.ap_list[num].password);
-    return temp_ap;
-  }
-  void SetApDetails(int num, ap_details_t details) {
-    memset(&m_data.ap_list[num], 0, sizeof(ap_details_t));
-    strcpy(m_data.ap_list[num].ssid, details.ssid);
-    strcpy(m_data.ap_list[num].password, details.password);
-  }
-
-  void GetMqttHostName(char* hostname) {
-    strcpy(hostname, m_data.mqtt_host_name);
-  }
-  void Commit() {
-    int address = 0;
-    for (int i=0; i < 3; i++) {
-      for (int j=0; j<50; j++) {
-        EEPROM.write(address, m_data.ap_list[i].ssid[j]);
-        address++;
-      }
-      for (int j=0; j<50; j++) {
-        EEPROM.write(address, m_data.ap_list[i].password[j]);
-        address++;
-      }
+    bool Valid() {
+      if (!m_cached)
+        return false;
+      return m_data.magic == EEPROM_MAGIC;
     }
-    for (int i=0; i < 50; i++) {
-      EEPROM.write(address, m_data.mqtt_host_name[i]);
-      address++;
+    bool GetApCred(int num, ApCred& cred) {
+      if (!Valid())
+        return false;
+      cred.ssid = m_data.ap_list[num].ssid;
+      cred.password = m_data.ap_list[num].password;
+      return true;
     }
-    EEPROM.commit();
-  }
+    bool SetApCred(int num, ApCred& cred) {
+      if (!Valid())
+        return false;
+      m_data.ap_list[num].ssid = cred.ssid;
+      m_data.ap_list[num].password = cred.password;
+      return true;
+    }
+  
+    bool GetMqttHostName(String& mqtt_host_name) {
+      if (!Valid())
+        return false;
+      mqtt_host_name = m_data.mqtt_host_name;
+      return true;
+    }
+    void Commit() {
+      int address = 0;
+      //write magic
+      EEPROM.write(address++, (byte)(m_data.magic >> 24));
+      EEPROM.write(address++, (byte)(m_data.magic >> 16));
+      EEPROM.write(address++, (byte)(m_data.magic >> 8));
+      EEPROM.write(address++, (byte)(m_data.magic >> 0));
+      for (int i=0; i < ApListSize; i++) {
+        //write ssid
+        for (int j=0; j<SsidStrLen; j++) {
+          EEPROM.write(address++, m_data.ap_list[i].ssid[j]);
+        }
+        //write password
+        for (int j=0; j<PassStrLen; j++) {
+          EEPROM.write(address++, m_data.ap_list[i].password[j]);
+        }
+      }
+      for (int i=0; i<MqttHostName; i++) {
+        EEPROM.write(address++, m_data.mqtt_host_name[i]);
+      }
+      EEPROM.commit();
+    }
 };
+
+EepromData eeprom_data;
 
 class WiFiScanner {
   struct {
     char ssid[50];
     int rssi;
+    bool excluded;
   } m_scanResults[10];
   int m_numNetworksFound;
     
@@ -184,11 +205,20 @@ class WiFiScanner {
         }
     }
 
+    void ExcludeNetworkSsid(char* to_exclude) {
+      for (int i=0; i<m_numNetworksFound; i++) {
+        if (!strcmp(m_scanResults[i].ssid, to_exclude)) {
+          m_scanResults[i].excluded = true;
+          break;
+        }
+      }
+    }
+
     char* GetBestNetworkSsid() {
       int maxRssi = -32767;
       int maxIndex = 0;
       for (int i=0; i<m_numNetworksFound; i++) {
-        if (m_scanResults[i].rssi >= maxRssi) {
+        if ((m_scanResults[i].rssi >= maxRssi) && (m_scanResults[i].excluded == false)) {
           maxRssi = m_scanResults[i].rssi;
           maxIndex = i;
         }
@@ -397,52 +427,72 @@ String topic_cmd() {
   return get_full_hostname() + String("/cmd");
 }
 
-void setup_wifi() {
-  char* ssid;
-  const char* password = "gm3351324";
+bool setup_wifi() {
+  char* best_ssid;
+  const char* password; // = "gm3351324";
   int numNetworks;
+  EepromData::ApCred cred;
+  int wifi_connection_wait;
 
   WiFiScanner wifi_scanner;
 
+  // Set Wifi Hostname.
+  String hostname(HOSTNAME);
+  hostname += String(ESP.getChipId(), HEX);
+  WiFi.hostname(hostname);
+
+  // Print Wifi hostname.
+  Serial.println("Hostname: " + WiFi.hostname());
+
+
   numNetworks = wifi_scanner.ScanNetworks();
+  if (numNetworks == 0) {
+    Serial.println("No WiFi Networks found - waiting...!!");
+    return false;
+  }
   Serial.print("Found ");
   Serial.print(numNetworks);
   Serial.println(" Networks");
-  ssid = wifi_scanner.GetBestNetworkSsid();
-  Serial.print("Best network is: ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
   
-#if 0
-  // We start by connecting to a WiFi network
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-#endif
+#define WIFI_CONNECTION_WAIT_MAX 10
   
+  for (int i=0; i<numNetworks; i++) {
+    best_ssid = wifi_scanner.GetBestNetworkSsid();
+    Serial.print("Best SSID is: ");
+    Serial.println(best_ssid);
+    //find credantials of best AP
+    for (int j=0; j<EepromData::ApListSize; j++) {
+      if (eeprom_data.GetApCred(j, cred)) {
+        if (cred.ssid == best_ssid) {
+          Serial.println("Found credentials for best AP, trying to associate...");
+          WiFi.begin(cred.ssid.c_str(), cred.password.c_str());
+          wifi_connection_wait = 0;
+          while ((WiFi.status() != WL_CONNECTED) && (wifi_connection_wait < WIFI_CONNECTION_WAIT_MAX)) {
+            delay(500);
+            Serial.print(".");
+            wifi_connection_wait++;
+          }
+          if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("Failed association to this network, trying next best...");
+            wifi_scanner.ExcludeNetworkSsid(best_ssid);
+          } else {
+            //success!
+            Serial.println("");
+            Serial.println("WiFi connected");
+            Serial.println("IP address: ");
+            Serial.println(WiFi.localIP());
+            return true;
+          }
+        }
+      }
+    }//for j
+  //if we got here, we didn't find credentials for best AP
+    Serial.println("Didn't find credentials for best AP in EEPROM - trying next best");
+    wifi_scanner.ExcludeNetworkSsid(best_ssid);
+  }//for i
+  //if we got here, we failed
+  Serial.println("Couldn't connect based on EEPROM data and best available networks - will reboot in AP mode to configure EEPROM!");
+  return false;
 }
 
 String build_payload_string(byte* payload, unsigned int length) {
@@ -752,39 +802,42 @@ void reconnect() {
 void setup() {
 
   Serial.begin(115200);
-
-  EEPROM.begin(4);
-
   irsend.begin();
+  eeprom_data.Begin();
   
-
   active_led.SetBlinkRate(Blinker::BLINK_RATE_OFF);
 
   Serial.println("\r\n");
   Serial.print("Chip ID: 0x");
   Serial.println(ESP.getChipId(), HEX);
+  Serial.println(eeprom_data.Valid() ? "EEPROM is valid" : "EEPROM is not valid");
+  if (!eeprom_data.Valid()) {
+    Serial.println("EEPROM data is invalid - going to reboot into a web server to configure WiFi/MQTT credentials");
+    //TODO:
+  }
 
-  // Set Hostname.
+  // Start OTA server.
   String hostname(HOSTNAME);
   hostname += String(ESP.getChipId(), HEX);
-  WiFi.hostname(hostname);
-
-  // Print hostname.
-  Serial.println("Hostname: " + WiFi.hostname());
-  //Serial.println(WiFi.hostname());
-
-  // Start OTA server.
-  // Start OTA server.
   ArduinoOTA.setHostname((const char *)hostname.c_str());
   ArduinoOTA.begin();
 
   pinMode(2, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
 
   client.setCallback(callback);
-  client.setServer(mqtt_server, 1883);
+  String mqtt_host_name;
+  if (eeprom_data.GetMqttHostName(mqtt_host_name)) {
+    client.setServer(mqtt_host_name.c_str(), 1883);
+  } else {
+    Serial.println("EEPROM data is invalid - going to reboot into a web server to configure WiFi/MQTT credentials");
+    //TODO:
+  }
 
   active_led.SetBlinkRate(Blinker::BLINK_RATE_SLOW);
-  setup_wifi();
+  if (!setup_wifi()) {
+    Serial.println("Failed setup_wifi() - going to open a web server to configure WiFi credentials");
+    //TODO
+  }
   active_led.SetBlinkRate(Blinker::BLINK_RATE_FAST);
 
 //  A2DSampler a2d_sampler(10);
@@ -803,7 +856,7 @@ void loop() {
 
   client.loop();
   //run the led blink timer
-
+/*
   long now = millis();
   static long last;
   if (now - last > 2000) {
@@ -814,7 +867,7 @@ void loop() {
     Serial.print("EEPROM value = ");
     Serial.println(val);
   }
-
+*/
   String result_topic = get_full_hostname() + String("/") + String("adc");
   int payload_size = MQTT_MAX_PACKET_SIZE-5-2 - result_topic.length() - 2;
 //  long now = millis();
