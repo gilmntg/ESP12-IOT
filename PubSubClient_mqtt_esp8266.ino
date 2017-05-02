@@ -34,6 +34,9 @@
 #include <ArduinoOTA.h>
 #include "SimpleTimer.h"
 #include <EEPROM.h>
+#include <WiFiClient.h>
+
+
 
 extern "C" {
 #include "user_interface.h"
@@ -52,6 +55,385 @@ const char* mqtt_server = "raspberrypi-desktop";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+class EepromData {
+
+  public:
+    enum { eeprom_magic=0x07121960   };
+    enum { ApListSize=3, SsidStrLen=33, PassStrLen=65, MqttHostNameStrLen=33 };
+    enum eCredIndex { eCred0, eCred1, eCred2 };
+    struct ApCred {
+      char ssid[SsidStrLen];
+      char password[PassStrLen];
+    };
+  private:
+    struct {
+      uint32_t magic;
+      ApCred ap_list[ApListSize];
+      char mqtt_host_name[MqttHostNameStrLen];
+    } m_data;
+    bool m_cached;
+    
+  public:
+    EepromData() {
+      m_cached = false;
+      memset((void*)&m_data, 0, sizeof(m_data));
+    }
+    ~EepromData() {}
+  
+    void Begin() {
+      EEPROM.begin(512);
+      //Clear();//TODO - Remove!!!
+      int address = 0;
+      //read magic
+      m_data.magic |= (uint32_t)EEPROM.read(address++) << 24;
+      m_data.magic |= (uint32_t)EEPROM.read(address++) << 16;
+      m_data.magic |= (uint32_t)EEPROM.read(address++) << 8;
+      m_data.magic |= (uint32_t)EEPROM.read(address++) << 0;
+      Serial.println("");
+      Serial.print("Eeprom magic = 0x");
+      Serial.println(m_data.magic, HEX);
+      for (int i=0; i < ApListSize; i++) {
+        //read ssid
+        for (int j=0; j<SsidStrLen; j++) {
+          m_data.ap_list[i].ssid[j] = char(EEPROM.read(address++));
+        }
+        Serial.print("Eeprom ssid: ");
+        Serial.print(i);
+        Serial.print("  = ");
+        Serial.println(m_data.ap_list[i].ssid);
+        //read password
+        for (int j=0; j<PassStrLen; j++) {
+          m_data.ap_list[i].password[j] = char(EEPROM.read(address++));
+        }
+        Serial.print("Eeprom password: ");
+        Serial.print(i);
+        Serial.print("  = ");
+        Serial.println(m_data.ap_list[i].password);
+      }
+      for (int i=0; i<MqttHostNameStrLen; i++) {
+        m_data.mqtt_host_name[i] = char(EEPROM.read(address++));
+      }
+      Serial.print("Eeprom mqtt: ");
+      Serial.println(m_data.mqtt_host_name);
+      m_cached = true;
+    }
+    //for testing only
+    void Clear() {
+      for (int i=0; i<512; i++) {
+        EEPROM.write(i, 0);
+      }
+      EEPROM.commit();
+    }
+    bool Valid() {
+      if (!m_cached)
+        return false;
+      return m_data.magic == eeprom_magic;
+    }
+    bool GetPasswordForSsid( String ssid, String& password) {
+      if (!Valid())
+        return false;
+      for (int i=0; i<ApListSize; i++) {
+        if (String(m_data.ap_list[i].ssid) == ssid) {
+          password = String(m_data.ap_list[i].password);
+          return true;
+        }
+      }
+      return false;
+    }
+    bool GetApCred(eCredIndex num, ApCred& cred) {
+      if (!Valid())
+        return false;
+      strcpy(cred.ssid, m_data.ap_list[num].ssid);
+      strcpy(cred.password, m_data.ap_list[num].password);
+      return true;
+    }
+    bool SetApCred(eCredIndex num, ApCred& cred) {
+      strcpy(m_data.ap_list[num].ssid, cred.ssid);
+      strcpy(m_data.ap_list[num].password, cred.password);
+      return true;
+    }
+  
+    bool GetMqttHostName(String& mqtt_host_name) {
+      if (!Valid())
+        return false;
+      mqtt_host_name = String(m_data.mqtt_host_name);
+      return true;
+    }
+    bool SetMqttHostName(String& mqtt_host_name) {
+      strcpy(m_data.mqtt_host_name, mqtt_host_name.c_str());
+      return true;
+    }
+
+    void Commit() {
+      int address = 0;
+      //write magic
+      EEPROM.write(address++, (byte)((eeprom_magic >> 24) & 0xff));
+      EEPROM.write(address++, (byte)((eeprom_magic >> 16) & 0xff));
+      EEPROM.write(address++, (byte)((eeprom_magic >> 8) & 0xff));
+      EEPROM.write(address++, (byte)((eeprom_magic >> 0) & 0xff));
+      for (int i=0; i < ApListSize; i++) {
+        //write ssid
+        Serial.println("commiting ssid");
+        for (int j=0; j<SsidStrLen; j++) {
+          EEPROM.write(address++, m_data.ap_list[i].ssid[j]);
+          Serial.print(m_data.ap_list[i].ssid[j]);
+        }
+        Serial.println("");
+        Serial.println("commiting pass");
+        //write password
+        for (int j=0; j<PassStrLen; j++) {
+          EEPROM.write(address++, m_data.ap_list[i].password[j]);
+          Serial.print(m_data.ap_list[i].password[j]);
+        }
+      }
+      Serial.println("");
+      Serial.println("commiting mqtt");
+      for (int i=0; i<MqttHostNameStrLen; i++) {
+        EEPROM.write(address++, m_data.mqtt_host_name[i]);
+        Serial.print(m_data.mqtt_host_name[i]);
+      }
+      Serial.println("");
+      EEPROM.commit();
+    }
+};
+
+EepromData eeprom_data;
+
+
+/************************************************Taken from Example*****************************************/
+MDNSResponder mdns;
+WiFiServer server(80);
+
+const char* ssid = "BUBBLES";
+String st;
+
+void launchWeb(int webtype) {
+          Serial.println("");
+          Serial.println("WiFi connected");
+          Serial.println(WiFi.localIP());
+          Serial.println(WiFi.softAPIP());
+          if (!MDNS.begin("esp8266")) {
+            Serial.println("Error setting up MDNS responder!");
+            while(1) { 
+              delay(1000);
+            }
+          }
+          Serial.println("mDNS responder started");
+          // Start the server
+          server.begin();
+          Serial.println("Server started");   
+          int b = 20;
+          int c = 0;
+          while(b == 20) { 
+             b = mdns1(webtype);
+           }
+}
+
+void setupAP(void) {
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  int n = WiFi.scanNetworks();
+  Serial.println("scan done");
+  if (n == 0)
+    Serial.println("no networks found");
+  else
+  {
+    Serial.print(n);
+    Serial.println(" networks found");
+    for (int i = 0; i < n; ++i)
+     {
+      // Print SSID and RSSI for each network found
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(")");
+      Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE)?" ":"*");
+      delay(10);
+     }
+  }
+  Serial.println(""); 
+  st = "<ul>";
+  for (int i = 0; i < n; ++i)
+    {
+      // Print SSID and RSSI for each network found
+      st += "<li>";
+      st +=i + 1;
+      st += ": ";
+      st += WiFi.SSID(i);
+      st += " (";
+      st += WiFi.RSSI(i);
+      st += ")";
+      st += (WiFi.encryptionType(i) == ENC_TYPE_NONE)?" ":"*";
+      st += "</li>";
+    }
+  st += "</ul>";
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid);
+  Serial.println("softap");
+  Serial.println("");
+  launchWeb(1);
+  Serial.println("over");
+}
+
+int mdns1(int webtype)
+{
+  // Check for any mDNS queries and send responses
+  MDNS.update();
+  
+  
+  // Check if a client has connected
+  WiFiClient client = server.available();
+  if (!client) {
+    return(20);
+  }
+  Serial.println("");
+  Serial.println("New client");
+
+  // Wait for data from client to become available
+  while(client.connected() && !client.available()){
+    delay(1);
+   }
+  
+  // Read the first line of HTTP request
+  String req = client.readStringUntil('\r');
+  
+  // First line of HTTP request looks like "GET /path HTTP/1.1"
+  // Retrieve the "/path" part by finding the spaces
+  int addr_start = req.indexOf(' ');
+  int addr_end = req.indexOf(' ', addr_start + 1);
+  if (addr_start == -1 || addr_end == -1) {
+    Serial.print("Invalid request: ");
+    Serial.println(req);
+    return(20);
+   }
+  req = req.substring(addr_start + 1, addr_end);
+  Serial.print("Request: ");
+  Serial.println(req);
+  client.flush(); 
+  String s;
+  if ( webtype == 1 ) {
+      if (req == "/")
+      {
+        IPAddress ip = WiFi.softAPIP();
+        String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 at ";
+        s += ipStr;
+        s += "<p>";
+        s += st;
+//        s += "<form method='get' action='a'><label>SSID: </label><input name='ssid' length=32><input name='pass' length=64><input type='submit'></form>";
+        s += "<form method='get' action='a'>";
+        s += "<TABLE BORDER='1'>";
+        s += "<TR>";
+        s += "<TD><label>SSID: </label><input name='ssid1' length=32><label>PASS: </label><input name='pass1' length=64></TD>";
+        s += "</TR>";
+        s += "<TR>";
+        s += "<TD><label>SSID: </label><input name='ssid2' length=32><label>PASS: </label><input name='pass2' length=64></TD>";
+        s += "</TR>";
+        s += "<TR>";
+        s += "<TD><label>SSID: </label><input name='ssid3' length=32><label>PASS: </label><input name='pass3' length=64></TD>";
+        s += "<TR>";
+        s += "<TD><label>MQTTSERVER: </label><input name='mqtt_server' length=32></TD>";
+        s += "</TR>";
+        s += "</TABLE>";
+        s += "<input type='submit'></form>";
+        s += "</html>\r\n\r\n";
+        Serial.println("Sending 200");
+      }
+      else if ( req.startsWith("/a?ssid1=") ) {
+        // /a?ssid1=blahhhh&pass1=poooo&ssid2=blahhh&pass2=pooo&ssid3=blahhh&pass3=pooo&mqtt_server=kkkk
+//        Serial.println("clearing eeprom");
+//        for (int i = 0; i < 96; ++i) { EEPROM.write(i, 0); }
+        String qsid1 = req.substring(9,req.indexOf('&'));
+        Serial.println(qsid1);
+        Serial.println("");
+        String qpass1 = req.substring(req.indexOf("pass1")+6, req.indexOf("ssid2")-1);
+        Serial.println(qpass1);
+        Serial.println("");
+        String qsid2 = req.substring(req.indexOf("ssid2")+6, req.indexOf("pass2")-1);
+        Serial.println(qsid2);
+        Serial.println("");
+        String qpass2 = req.substring(req.indexOf("pass2")+6, req.indexOf("ssid3")-1);
+        Serial.println(qpass2);
+        Serial.println("");
+        String qsid3 = req.substring(req.indexOf("ssid3")+6, req.indexOf("pass3")-1);
+        Serial.println(qsid3);
+        Serial.println("");
+        String qpass3 = req.substring(req.indexOf("pass3")+6, req.indexOf("mqtt_server")-1);
+        Serial.println(qpass3);
+        Serial.println("");
+        String qmqtt_server = req.substring(req.lastIndexOf('=')+1);
+        Serial.println(qmqtt_server);
+        Serial.println("");
+
+        
+        Serial.println("writing eeprom...");
+        EepromData::ApCred cred;
+        
+        strcpy(cred.ssid, qsid1.c_str());
+        strcpy(cred.password, qpass1.c_str());
+        eeprom_data.SetApCred(EepromData::eCred0, cred);
+
+        strcpy(cred.ssid, qsid2.c_str());
+        strcpy(cred.password, qpass2.c_str());
+        eeprom_data.SetApCred(EepromData::eCred1, cred);
+        
+        strcpy(cred.ssid, qsid3.c_str());
+        strcpy(cred.password, qpass3.c_str());
+        eeprom_data.SetMqttHostName(qmqtt_server);
+
+        eeprom_data.Commit();
+        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 ";
+        s += "Found ";
+        s += req;
+        s += "<p> saved to eeprom... reset to boot into new wifi</html>\r\n\r\n";
+      }
+      else
+      {
+        s = "HTTP/1.1 404 Not Found\r\n\r\n";
+        Serial.println("Sending 404");
+      }
+  } 
+  else
+  {
+      if (req == "/")
+      {
+        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266";
+        s += "<p>";
+        s += "</html>\r\n\r\n";
+        Serial.println("Sending 200");
+      }
+      else if ( req.startsWith("/cleareeprom") ) {
+        s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266";
+        s += "<p>Clearing the EEPROM<p>";
+        s += "</html>\r\n\r\n";
+        Serial.println("Sending 200");  
+        Serial.println("clearing eeprom");
+        for (int i = 0; i < 96; ++i) { EEPROM.write(i, 0); }
+        EEPROM.commit();
+      }
+      else
+      {
+        s = "HTTP/1.1 404 Not Found\r\n\r\n";
+        Serial.println("Sending 404");
+      }       
+  }
+  client.print(s);
+  Serial.println("Done with client");
+  return(20);
+}
+ 
+ /************************************************Till Here**************************************************/
+
+
+
+
 
 long lastMsg = 0;
 char msg[50];
@@ -66,110 +448,10 @@ String get_full_hostname() {
 
 String debugtopic("");
 
-class EepromData {
-
-  public:
-    struct ApCred {
-      String ssid;
-      String password;
-    };
-  #define EEPROM_MAGIC 0x07121960  
-    enum { ApListSize=3, SsidStrLen=32, PassStrLen=32, MqttHostName=32 };
-  private:
-    struct {
-      int magic;
-      ApCred ap_list[ApListSize];
-      String mqtt_host_name;
-    } m_data;
-    bool m_cached;
-    
-  public:
-    EepromData() {
-      m_data.magic = 0;
-      m_cached = false;
-    }
-    ~EepromData() {}
-  
-    void Begin() {
-      EEPROM.begin(sizeof(m_data));
-      int address = 0;
-      //read magic
-      m_data.magic |= (int)EEPROM.read(address++) << 24;
-      m_data.magic |= (int)EEPROM.read(address++) << 16;
-      m_data.magic |= (int)EEPROM.read(address++) << 8;
-      m_data.magic |= (int)EEPROM.read(address++) << 0;
-      for (int i=0; i < ApListSize; i++) {
-        //read ssid
-        for (int j=0; j<SsidStrLen; j++) {
-          m_data.ap_list[i].ssid += (char)EEPROM.read(address++);
-        }
-        //read password
-        for (int j=0; j<PassStrLen; j++) {
-          m_data.ap_list[i].password += (char)EEPROM.read(address++);
-        }
-      }
-      for (int i=0; i<MqttHostName; i++) {
-        m_data.mqtt_host_name += (char)EEPROM.read(address++);
-      }
-      m_cached = true;
-    }
-    
-  
-    bool Valid() {
-      if (!m_cached)
-        return false;
-      return m_data.magic == EEPROM_MAGIC;
-    }
-    bool GetApCred(int num, ApCred& cred) {
-      if (!Valid())
-        return false;
-      cred.ssid = m_data.ap_list[num].ssid;
-      cred.password = m_data.ap_list[num].password;
-      return true;
-    }
-    bool SetApCred(int num, ApCred& cred) {
-      if (!Valid())
-        return false;
-      m_data.ap_list[num].ssid = cred.ssid;
-      m_data.ap_list[num].password = cred.password;
-      return true;
-    }
-  
-    bool GetMqttHostName(String& mqtt_host_name) {
-      if (!Valid())
-        return false;
-      mqtt_host_name = m_data.mqtt_host_name;
-      return true;
-    }
-    void Commit() {
-      int address = 0;
-      //write magic
-      EEPROM.write(address++, (byte)(m_data.magic >> 24));
-      EEPROM.write(address++, (byte)(m_data.magic >> 16));
-      EEPROM.write(address++, (byte)(m_data.magic >> 8));
-      EEPROM.write(address++, (byte)(m_data.magic >> 0));
-      for (int i=0; i < ApListSize; i++) {
-        //write ssid
-        for (int j=0; j<SsidStrLen; j++) {
-          EEPROM.write(address++, m_data.ap_list[i].ssid[j]);
-        }
-        //write password
-        for (int j=0; j<PassStrLen; j++) {
-          EEPROM.write(address++, m_data.ap_list[i].password[j]);
-        }
-      }
-      for (int i=0; i<MqttHostName; i++) {
-        EEPROM.write(address++, m_data.mqtt_host_name[i]);
-      }
-      EEPROM.commit();
-    }
-};
-
-EepromData eeprom_data;
 
 class WiFiScanner {
   struct {
-    char ssid[50];
+    String ssid;
     int rssi;
     bool excluded;
   } m_scanResults[10];
@@ -181,40 +463,44 @@ class WiFiScanner {
       WiFi.disconnect();
       delay(100);
       m_numNetworksFound = 0;
-      memset(m_scanResults, 0, sizeof(m_scanResults));
+      for (int i=0; i<10; i++) {
+        m_scanResults[i].ssid = "";
+        m_scanResults[i].rssi = -32767;
+        m_scanResults[i].excluded = false;
+      }
     };
     ~WiFiScanner() {};
 
     int ScanNetworks() {
-        memset(m_scanResults, 0, sizeof(m_scanResults));
         m_numNetworksFound = WiFi.scanNetworks();
         Serial.println("scan done");
         if (m_numNetworksFound == 0) {
           Serial.println("no networks found");
           return 0;
         }  else {
-          Serial.print(m_numNetworksFound);
-          Serial.println(" networks found");
-          for (int i = 0; i < m_numNetworksFound; ++i)
-          {
-            // SSID and RSSI for each network found
-            m_scanResults[i].rssi = WiFi.RSSI(i); 
-            strcpy(m_scanResults[i].ssid, WiFi.SSID(i).c_str()); 
-          }
-          return m_numNetworksFound;
+            Serial.print(m_numNetworksFound);
+            Serial.println(" networks found");
+            for (int i = 0; i < m_numNetworksFound; ++i)
+            {
+              // SSID and RSSI for each network found
+              m_scanResults[i].rssi = WiFi.RSSI(i); 
+              m_scanResults[i].ssid = WiFi.SSID(i); 
+              m_scanResults[i].excluded = false;
+            }
+            return m_numNetworksFound;
         }
     }
 
-    void ExcludeNetworkSsid(char* to_exclude) {
+    void ExcludeNetworkSsid(String to_exclude) {
       for (int i=0; i<m_numNetworksFound; i++) {
-        if (!strcmp(m_scanResults[i].ssid, to_exclude)) {
+        if (m_scanResults[i].ssid == to_exclude) {
           m_scanResults[i].excluded = true;
           break;
         }
       }
     }
 
-    char* GetBestNetworkSsid() {
+    String GetBestNetworkSsid() {
       int maxRssi = -32767;
       int maxIndex = 0;
       for (int i=0; i<m_numNetworksFound; i++) {
@@ -428,8 +714,8 @@ String topic_cmd() {
 }
 
 bool setup_wifi() {
-  char* best_ssid;
-  const char* password; // = "gm3351324";
+  String best_ssid, best_password;
+  const char* password; // = "gm3351324"; //TODO - remove!!!
   int numNetworks;
   EepromData::ApCred cred;
   int wifi_connection_wait;
@@ -454,41 +740,41 @@ bool setup_wifi() {
   Serial.print(numNetworks);
   Serial.println(" Networks");
   
-#define WIFI_CONNECTION_WAIT_MAX 10
+#define WIFI_CONNECTION_WAIT_MAX 100
   
   for (int i=0; i<numNetworks; i++) {
     best_ssid = wifi_scanner.GetBestNetworkSsid();
     Serial.print("Best SSID is: ");
     Serial.println(best_ssid);
-    //find credantials of best AP
-    for (int j=0; j<EepromData::ApListSize; j++) {
-      if (eeprom_data.GetApCred(j, cred)) {
-        if (cred.ssid == best_ssid) {
-          Serial.println("Found credentials for best AP, trying to associate...");
-          WiFi.begin(cred.ssid.c_str(), cred.password.c_str());
-          wifi_connection_wait = 0;
-          while ((WiFi.status() != WL_CONNECTED) && (wifi_connection_wait < WIFI_CONNECTION_WAIT_MAX)) {
-            delay(500);
-            Serial.print(".");
-            wifi_connection_wait++;
-          }
-          if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("Failed association to this network, trying next best...");
-            wifi_scanner.ExcludeNetworkSsid(best_ssid);
-          } else {
-            //success!
-            Serial.println("");
-            Serial.println("WiFi connected");
-            Serial.println("IP address: ");
-            Serial.println(WiFi.localIP());
-            return true;
-          }
-        }
-      }
-    }//for j
-  //if we got here, we didn't find credentials for best AP
-    Serial.println("Didn't find credentials for best AP in EEPROM - trying next best");
-    wifi_scanner.ExcludeNetworkSsid(best_ssid);
+    //find password for best AP
+    if (!eeprom_data.GetPasswordForSsid(best_ssid, best_password)) {
+      Serial.println("Didn't find best AP in EEPROM - trying next best");
+      wifi_scanner.ExcludeNetworkSsid(best_ssid);
+      continue;
+    }
+    Serial.print("Found best AP in EEPROM, trying to associate using ssid = ");
+    Serial.print(best_ssid.c_str());
+    Serial.print(" password = ");
+    Serial.println(best_password.c_str());
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(best_ssid.c_str(), best_password.c_str());
+    wifi_connection_wait = 0;
+    while ((WiFi.status() != WL_CONNECTED) && (wifi_connection_wait < WIFI_CONNECTION_WAIT_MAX)) {
+      delay(500);
+      Serial.print(".");
+      wifi_connection_wait++;
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Failed association to this network, trying next best...");
+      wifi_scanner.ExcludeNetworkSsid(best_ssid);
+      continue;
+    }
+    //success
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+    return true;
   }//for i
   //if we got here, we failed
   Serial.println("Couldn't connect based on EEPROM data and best available networks - will reboot in AP mode to configure EEPROM!");
@@ -814,6 +1100,7 @@ void setup() {
   if (!eeprom_data.Valid()) {
     Serial.println("EEPROM data is invalid - going to reboot into a web server to configure WiFi/MQTT credentials");
     //TODO:
+    setupAP();
   }
 
   // Start OTA server.
@@ -831,12 +1118,14 @@ void setup() {
   } else {
     Serial.println("EEPROM data is invalid - going to reboot into a web server to configure WiFi/MQTT credentials");
     //TODO:
+    setupAP();
   }
 
   active_led.SetBlinkRate(Blinker::BLINK_RATE_SLOW);
   if (!setup_wifi()) {
     Serial.println("Failed setup_wifi() - going to open a web server to configure WiFi credentials");
     //TODO
+    setupAP();
   }
   active_led.SetBlinkRate(Blinker::BLINK_RATE_FAST);
 
