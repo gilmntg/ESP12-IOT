@@ -43,8 +43,18 @@ extern "C" {
 }
 
 #include <IRremoteESP8266.h>
+#include <IRsend.h>  // Needed if you want to send IR commands.
+
 
 #define HOSTNAME "ESP12E-" ///< Hostename. The setup function adds the Chip ID at the end
+#define MAX_TIME_TO_TRY_BEFORE_REVERTING_TO_WEB_PORTAL_MS 300000
+
+String get_full_hostname() {
+  String my_hostname(HOSTNAME);
+  my_hostname += String(ESP.getChipId(), HEX);
+  return my_hostname;
+}
+
 // Update these with values suitable for your network.
 
 //const char* ssid = "gmontag-room";
@@ -70,6 +80,7 @@ class EepromData {
       uint32_t magic;
       ApCred ap_list[ApListSize];
       char mqtt_host_name[MqttHostNameStrLen];
+      uint8_t mqtt_ip[4];
     } m_data;
     bool m_cached;
     
@@ -84,6 +95,7 @@ class EepromData {
       EEPROM.begin(512);
       //Clear();//TODO - Remove!!!
       int address = 0;
+#if 0      
       //read magic
       m_data.magic |= (uint32_t)EEPROM.read(address++) << 24;
       m_data.magic |= (uint32_t)EEPROM.read(address++) << 16;
@@ -115,6 +127,31 @@ class EepromData {
       }
       Serial.print("Eeprom mqtt: ");
       Serial.println(m_data.mqtt_host_name);
+#endif
+      uint8_t *m_data_p = (uint8_t *)&m_data;
+      for (int i=0; i<sizeof(m_data); i++) {
+        m_data_p[i] = EEPROM.read(address++);
+      }
+      Serial.println("");
+      Serial.print("Eeprom magic = 0x");
+      Serial.println(m_data.magic, HEX);
+      for (int i=0; i < ApListSize; i++) {
+        //read ssid
+        Serial.print("Eeprom ssid: ");
+        Serial.print(i);
+        Serial.print("  = ");
+        Serial.println(m_data.ap_list[i].ssid);
+        //read password
+        Serial.print("Eeprom password: ");
+        Serial.print(i);
+        Serial.print("  = ");
+        Serial.println(m_data.ap_list[i].password);
+      }
+      Serial.print("Eeprom mqtt: ");
+      Serial.print(m_data.mqtt_ip[0]);Serial.print(".");
+      Serial.print(m_data.mqtt_ip[1]);Serial.print(".");
+      Serial.print(m_data.mqtt_ip[2]);Serial.print(".");      
+      Serial.println(m_data.mqtt_ip[3]);
       m_cached = true;
     }
     //for testing only
@@ -125,6 +162,7 @@ class EepromData {
       EEPROM.commit();
     }
     bool Valid() {
+//      return false;
       if (!m_cached)
         return false;
       return m_data.magic == eeprom_magic;
@@ -163,9 +201,23 @@ class EepromData {
       strcpy(m_data.mqtt_host_name, mqtt_host_name.c_str());
       return true;
     }
+    bool SetMqttIpByte(const int byte_num, String& data) {
+      if ((byte_num >=0) && (byte_num<=3))
+        m_data.mqtt_ip[byte_num] = data.toInt();
+        return true;
+      return false;
+    }
+    bool GetMqttIpBytes(uint8_t bytes[]) {
+      if (!Valid())
+        return false;
+      memcpy(bytes, m_data.mqtt_ip, 4);
+        return true;
+    }
 
     void Commit() {
       int address = 0;
+      m_data.magic = eeprom_magic;
+#if 0      
       //write magic
       EEPROM.write(address++, (byte)((eeprom_magic >> 24) & 0xff));
       EEPROM.write(address++, (byte)((eeprom_magic >> 16) & 0xff));
@@ -193,6 +245,12 @@ class EepromData {
         Serial.print(m_data.mqtt_host_name[i]);
       }
       Serial.println("");
+#endif
+      uint8_t *m_data_p = (uint8_t *)&m_data;
+      for (int i = 0; i < sizeof(m_data); i++) {
+        EEPROM.write(address++, (byte)(*m_data_p));
+        m_data_p++;
+      }
       EEPROM.commit();
     }
 };
@@ -204,29 +262,31 @@ EepromData eeprom_data;
 MDNSResponder mdns;
 WiFiServer server(80);
 
-const char* ssid = "BUBBLES";
+
 String st;
 
 void launchWeb(int webtype) {
-          Serial.println("");
-          Serial.println("WiFi connected");
-          Serial.println(WiFi.localIP());
-          Serial.println(WiFi.softAPIP());
-          if (!MDNS.begin("esp8266")) {
-            Serial.println("Error setting up MDNS responder!");
-            while(1) { 
-              delay(1000);
-            }
-          }
-          Serial.println("mDNS responder started");
-          // Start the server
-          server.begin();
-          Serial.println("Server started");   
-          int b = 20;
-          int c = 0;
-          while(b == 20) { 
-             b = mdns1(webtype);
-           }
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println(WiFi.localIP());
+  Serial.println(WiFi.softAPIP());
+  if (!MDNS.begin("esp8266")) {
+    Serial.println("Error setting up MDNS responder!");
+    while(1) { 
+      delay(1000);
+    }
+  }
+  Serial.println("mDNS responder started");
+  // Start the server
+  server.begin();
+  Serial.println("Server started");   
+  int b = 20;
+  int c = 0;
+  while(b == 20) { 
+     b = mdns1(webtype);
+     //handle OTA upgrade
+     ArduinoOTA.handle();
+  }
 }
 
 void setupAP(void) {
@@ -275,6 +335,9 @@ void setupAP(void) {
   WiFi.mode(WIFI_OFF);
   delay(100);
   WiFi.mode(WIFI_AP);
+  const char* ssid = "ESP12E-AP";//get_full_hostname().c_str();
+  Serial.print("Opening AP with ssid =");
+  Serial.println(ssid);
   WiFi.softAP(ssid);
   Serial.println("softap");
   Serial.println("");
@@ -339,7 +402,7 @@ int mdns1(int webtype)
         s += "<TR>";
         s += "<TD><label>SSID: </label><input name='ssid3' length=32><label>PASS: </label><input name='pass3' length=64></TD>";
         s += "<TR>";
-        s += "<TD><label>MQTTSERVER: </label><input name='mqtt_server' length=32></TD>";
+        s += "<TD><label>MQTTSERVER: </label><input name='mqtt_ip0' length=3><input name='mqtt_ip1' length=3><input name='mqtt_ip2' length=3><input name='mqtt_ip3' length=3></TD>";
         s += "</TR>";
         s += "</TABLE>";
         s += "<input type='submit'></form>";
@@ -347,7 +410,7 @@ int mdns1(int webtype)
         Serial.println("Sending 200");
       }
       else if ( req.startsWith("/a?ssid1=") ) {
-        // /a?ssid1=blahhhh&pass1=poooo&ssid2=blahhh&pass2=pooo&ssid3=blahhh&pass3=pooo&mqtt_server=kkkk
+        // /a?ssid1=blahhhh&pass1=poooo&ssid2=blahhh&pass2=pooo&ssid3=blahhh&pass3=pooo&mqtt_ip0=aaa&mqtt_ip1=bbb&mqtt_ip2=ccc&mqtt_ip3=ddd
 //        Serial.println("clearing eeprom");
 //        for (int i = 0; i < 96; ++i) { EEPROM.write(i, 0); }
         String qsid1 = req.substring(9,req.indexOf('&'));
@@ -365,12 +428,14 @@ int mdns1(int webtype)
         String qsid3 = req.substring(req.indexOf("ssid3")+6, req.indexOf("pass3")-1);
         Serial.println(qsid3);
         Serial.println("");
-        String qpass3 = req.substring(req.indexOf("pass3")+6, req.indexOf("mqtt_server")-1);
+        String qpass3 = req.substring(req.indexOf("pass3")+6, req.indexOf("mqtt_ip0")-1);
         Serial.println(qpass3);
         Serial.println("");
-        String qmqtt_server = req.substring(req.lastIndexOf('=')+1);
-        Serial.println(qmqtt_server);
-        Serial.println("");
+        String qmqtt_ip0 = req.substring(req.indexOf("mqtt_ip0")+9, req.indexOf("mqtt_ip1")-1);
+        String qmqtt_ip1 = req.substring(req.indexOf("mqtt_ip1")+9, req.indexOf("mqtt_ip2")-1);
+        String qmqtt_ip2 = req.substring(req.indexOf("mqtt_ip2")+9, req.indexOf("mqtt_ip3")-1);
+        String qmqtt_ip3 = req.substring(req.indexOf("mqtt_ip3")+9, req.length());
+        Serial.print(qmqtt_ip0);Serial.print(".");Serial.print(qmqtt_ip1);Serial.print(".");Serial.print(qmqtt_ip2);Serial.print(".");Serial.println(qmqtt_ip3);
 
         
         Serial.println("writing eeprom...");
@@ -386,7 +451,13 @@ int mdns1(int webtype)
         
         strcpy(cred.ssid, qsid3.c_str());
         strcpy(cred.password, qpass3.c_str());
-        eeprom_data.SetMqttHostName(qmqtt_server);
+        eeprom_data.SetApCred(EepromData::eCred2, cred);
+
+        //eeprom_data.SetMqttHostName(qmqtt_server);
+        eeprom_data.SetMqttIpByte(0, qmqtt_ip0);
+        eeprom_data.SetMqttIpByte(1, qmqtt_ip1);
+        eeprom_data.SetMqttIpByte(2, qmqtt_ip2);
+        eeprom_data.SetMqttIpByte(3, qmqtt_ip3);
 
         eeprom_data.Commit();
         s = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!DOCTYPE HTML>\r\n<html>Hello from ESP8266 ";
@@ -425,12 +496,12 @@ int mdns1(int webtype)
       }       
   }
   client.print(s);
-  Serial.println("Done with client");
-  return(20);
+  Serial.println("Done with client - rebooting...");
+  ESP.restart();
+  //return(20);
 }
  
  /************************************************Till Here**************************************************/
-
 
 
 
@@ -440,11 +511,6 @@ char msg[50];
 int value = 0;
 
 
-String get_full_hostname() {
-  String my_hostname(HOSTNAME);
-  my_hostname += String(ESP.getChipId(), HEX);
-  return my_hostname;
-}
 
 String debugtopic("");
 
@@ -777,7 +843,6 @@ bool setup_wifi() {
     return true;
   }//for i
   //if we got here, we failed
-  Serial.println("Couldn't connect based on EEPROM data and best available networks - will reboot in AP mode to configure EEPROM!");
   return false;
 }
 
@@ -869,8 +934,8 @@ void ir_send_prot(int prot, unsigned int command, int nbits) {
 }
 
 #define IRSIGNAL_MAX_LEN 256
-unsigned int irSignalBuf[IRSIGNAL_MAX_LEN]; //raw buffer for IR irsend.sendRaw()
-unsigned int irSignalBufLen;
+uint16_t irSignalBuf[IRSIGNAL_MAX_LEN]; //raw buffer for IR irsend.sendRaw()
+uint16_t irSignalBufLen;
 
 void mqtt_debug_print( const char *msg ) {
     Serial.print(msg);
@@ -1056,12 +1121,26 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
   }
 }
+void invalidate_eeprom_and_reboot() {
+  eeprom_data.Clear(); //invalidating EEPROM
+  ESP.restart();
+}
 
 void reconnect() {
+
+  int timeout_ms = 0;
 
   // Loop until we're reconnected
   active_led.SetBlinkRate(Blinker::BLINK_RATE_FAST);
   while (!client.connected()) {
+    // Wait 5 seconds before retrying
+    delay(5000);
+    timeout_ms += 5000;
+    Serial.print("time = ");
+    Serial.print(timeout_ms/1000, DEC);
+    Serial.print(" out of ");
+    Serial.print(MAX_TIME_TO_TRY_BEFORE_REVERTING_TO_WEB_PORTAL_MS/1000, DEC);
+    Serial.println(" seconds before reverting to portal...");
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
     //                 id,               NULL, NULL, willTopic,willQos,willRetain,willMessage, cleanSession
@@ -1075,10 +1154,11 @@ void reconnect() {
       client.subscribe(topic_cmd().c_str(), 1);//qos = 1
     } else {
       Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
+      Serial.println(client.state());
+      if (timeout_ms >= MAX_TIME_TO_TRY_BEFORE_REVERTING_TO_WEB_PORTAL_MS) {
+        Serial.println("Timeout expired - rebooting into web portal...");
+        invalidate_eeprom_and_reboot();
+      }
     }
   }
   active_led.SetBlinkRate(Blinker::BLINK_RATE_ON);
@@ -1098,8 +1178,7 @@ void setup() {
   Serial.println(ESP.getChipId(), HEX);
   Serial.println(eeprom_data.Valid() ? "EEPROM is valid" : "EEPROM is not valid");
   if (!eeprom_data.Valid()) {
-    Serial.println("EEPROM data is invalid - going to reboot into a web server to configure WiFi/MQTT credentials");
-    //TODO:
+    Serial.println("EEPROM data is invalid - going to start a web server/portal on WiFi: ESP12E-AP IP: 192.168.4.1 to configure WiFi/MQTT credentials");
     setupAP();
   }
 
@@ -1112,19 +1191,23 @@ void setup() {
   pinMode(2, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
 
   client.setCallback(callback);
-  String mqtt_host_name;
-  if (eeprom_data.GetMqttHostName(mqtt_host_name)) {
-    client.setServer(mqtt_host_name.c_str(), 1883);
+  uint8_t mqtt_ip[4];
+  if (eeprom_data.GetMqttIpBytes(mqtt_ip)) {
+      Serial.print("Setting MQTT Server address: ");
+      Serial.print(mqtt_ip[0]);Serial.print(".");
+      Serial.print(mqtt_ip[1]);Serial.print(".");
+      Serial.print(mqtt_ip[2]);Serial.print(".");
+      Serial.println(mqtt_ip[3]);
+      client.setServer(IPAddress(mqtt_ip[0], mqtt_ip[1], mqtt_ip[2], mqtt_ip[3])/*mqtt_host_name.c_str()*/, 1883);
+//    client.setServer(mqtt_host_name.c_str(), 1883);
   } else {
     Serial.println("EEPROM data is invalid - going to reboot into a web server to configure WiFi/MQTT credentials");
-    //TODO:
     setupAP();
   }
 
   active_led.SetBlinkRate(Blinker::BLINK_RATE_SLOW);
   if (!setup_wifi()) {
     Serial.println("Failed setup_wifi() - going to open a web server to configure WiFi credentials");
-    //TODO
     setupAP();
   }
   active_led.SetBlinkRate(Blinker::BLINK_RATE_FAST);
@@ -1133,9 +1216,21 @@ void setup() {
 }
 
 void loop() {
+  long now;
+  static long wifi_good = 0;
+  long wifi_bad;
+
   if (WiFi.status() != WL_CONNECTED) {
     active_led.SetRate(Blinker::BLINK_RATE_SLOW);
-    setup_wifi();
+    if (!setup_wifi()) {
+      wifi_bad = millis();
+      if (wifi_bad - wifi_good >= MAX_TIME_TO_TRY_BEFORE_REVERTING_TO_WEB_PORTAL_MS) {
+        Serial.println("Timeout trying to setup_wifi()based on current eeprom values - Invalidating eeprom and rebooting into web portal to re-configure WiFi");
+        invalidate_eeprom_and_reboot();
+      }
+    }
+  } else {
+    wifi_good = millis();
     active_led.SetRate(Blinker::BLINK_RATE_FAST);
   }
 
